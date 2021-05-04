@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 import os
-from .version import __version__  # noqa
-from .backdrop import BackDrop  # noqa
 
 PACKAGEDIR = os.path.abspath(os.path.dirname(__file__))
+
+
+from .version import __version__  # noqa
+from .backdrop import BackDrop  # noqa
