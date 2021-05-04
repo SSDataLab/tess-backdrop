@@ -1,0 +1,21 @@
+site_name: TESS Backdrop
+nav:
+    - Home: index.md
+    - BackDrop: backdrop.md
+
+theme:
+  name: "material"
+repo_url: https://github.com/SSDataLab/tess-backdrop
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          selection:
+            docstring_style: "numpy"
+          rendering:
+            show_source: false
+      custom_templates: templates
+      watch:
+        - src/tess_backdrop
