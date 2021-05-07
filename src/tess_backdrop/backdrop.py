@@ -103,16 +103,6 @@ class BackDrop(object):
         self.star_mask = ~(hard_mask | ~sat_mask | (soft_mask / len(self.fnames) > 0.3))
         self.sat_mask = sat_mask
 
-        # This mask will get used to build a regressor for tess jitter
-        # self.jitter_mask =
-        #
-        # sigma_clip(
-        #     np.ma.masked_array(grad, (data > 1.0e5)),
-        #     sigma_upper=6,
-        #     maxiters=10,
-        #     sigma_lower=0,
-        # ).mask
-
         # We don't need all these pixels, it's too many to store for every frame.
         # Instead we'll just save 5000 of them.
         self.jitter_mask = soft_mask / len(self.fnames) > 0.3
@@ -357,7 +347,25 @@ class BackDrop(object):
             self.strap_w = hdu[4].data
             self.poly_w = hdu[5].data
 
-    def _build_correction(self, column, row, time):
+    def _build_correction(self, column, row, times=None):
+        if not hasattr(self, "spline_w"):
+            raise ValueError(
+                "tess-backdrop does not have any backdrop information. Do you need to `load` a backdrop file?"
+            )
+
+        if times is None:
+            tdxs = np.arange(len(self.t_start))
+        else:
+            if not np.in1d(np.round(times, 6), np.round(self.t_start, 6)).all():
+                raise ValueError(
+                    "tess-backdrop can not estimate some times in the input `times` array. No background information at that time."
+                )
+            tdxs = np.asarray(
+                [
+                    np.where(np.round(self.t_start, 6) == np.round(t, 6))[0][0]
+                    for t in times
+                ]
+            )
         """Builds a correction for an input column, row, and time array"""
         c, r = np.meshgrid(column, row)
         c, r = c / 2048 - 0.5, r / 2048 - 0.5
@@ -370,6 +378,17 @@ class BackDrop(object):
             ]
         ).T
         self._spline_X = self._get_spline_matrix(column, row)
+        bkg = np.zeros((len(tdxs), len(row), len(column)))
+        for idx, tdx in enumerate(tqdm(tdxs)):
+            poly = self._poly_X.dot(self.poly_w[tdx].ravel()).reshape(
+                (row.shape[0], column.shape[0])
+            )
+            spline = self._spline_X.dot(self.spline_w[tdx].ravel()).reshape(
+                (row.shape[0], column.shape[0])
+            )
+            strap = self.strap_w[tdx][column][None, :] * np.ones(row.shape[0])[:, None]
+            bkg[idx, :, :] = poly + spline + strap
+        return bkg
 
     def correct_tpf(self, tpf):
         """Returns a TPF with the background corrected"""
