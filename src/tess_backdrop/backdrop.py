@@ -87,10 +87,7 @@ class BackDrop(object):
                     raise ValueError("All files must have same sector, camera, ccd.")
 
                 # NOTE COLUMN NEEDS +45 EVENTUALLY
-                data, error = (
-                    hdu[1].data[:2048, 45 : 2048 + 45],
-                    hdu[2].data[:2048, 45 : 2048 + 45],
-                )
+                data = hdu[1].data[:2048, 45 : 2048 + 45]
                 if fname == self.fnames[0]:
                     sat_mask = get_saturation_mask(data)
 
@@ -123,10 +120,7 @@ class BackDrop(object):
             pass
 
         with fits.open(self.fnames[self.reference_frame]) as hdu:
-            data, error = (
-                hdu[1].data[:2048, 45 : 2048 + 45],
-                hdu[2].data[:2048, 45 : 2048 + 45],
-            )
+            data = hdu[1].data[:2048, 45 : 2048 + 45]
             grad = np.asarray(np.gradient(data))
             self.median_data = data[self.jitter_mask]
             self.median_gradient = grad[:, self.jitter_mask]
@@ -255,10 +249,7 @@ class BackDrop(object):
                 )
 
             # NOTE COLUMN NEEDS +45 EVENTUALLY
-            data, error = (
-                hdu[1].data[:2048, 45 : 2048 + 45],
-                hdu[2].data[:2048, 45 : 2048 + 45],
-            )
+            data = hdu[1].data[:2048, 45 : 2048 + 45]
             t_start = hdu[0].header["TSTART"]
 
             avg = np.sum(
@@ -300,7 +291,7 @@ class BackDrop(object):
             jitter_pix,
         )
 
-    def _get_jitter(self, data, error):
+    def _get_jitter(self, data):
         """Get the jitter correction somehow..."""
         # Use jitter mask.
 
