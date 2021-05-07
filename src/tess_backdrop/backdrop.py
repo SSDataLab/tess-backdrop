@@ -2,13 +2,14 @@ from astropy.io import fits
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
-
+import os
 
 from scipy.sparse import csr_matrix, vstack, hstack, lil_matrix
 from lightkurve.correctors.designmatrix import _spline_basis_vector
 from astropy.stats import sigma_clip
 
 from . import PACKAGEDIR
+from .version import __version__
 
 
 class BackDrop(object):
@@ -55,12 +56,14 @@ class BackDrop(object):
         self.nknots = nknots
         self.nb = nb
         self.reference_frame = reference_frame
-        self.reference_image = self.fnames[self.reference_frame]
+        if self.fnames is not None:
+            self.reference_image = self.fnames[self.reference_frame]
         self.knots_wbounds = _get_knots(np.arange(2048), nknots=nknots, degree=degree)
 
     def _build_mask(self):
         hard_mask = np.zeros((2048, 2048), dtype=bool)
         soft_mask = np.zeros((2048, 2048), dtype=int)
+
         for fname in tqdm(self.fnames, desc="Building Pixel Mask"):
             with fits.open(fname) as hdu:
                 if fname == self.fnames[0]:
@@ -81,18 +84,24 @@ class BackDrop(object):
                     hdu[1].data[:2048, 45 : 2048 + 45],
                     hdu[2].data[:2048, 45 : 2048 + 45],
                 )
+                if fname == self.fnames[0]:
+                    sat_mask = get_saturation_mask(data)
+
                 grad = np.hypot(*np.gradient(data))
+
                 # This mask highlights pixels where there is a sharp flux gradient.
-                hard_mask |= (grad > 300) | (data > 5000)
+                hard_mask |= (grad > 300) | (data > 3000)
                 soft_mask[
                     sigma_clip(
                         np.ma.masked_array(grad, hard_mask),
-                        sigma_upper=3,
+                        sigma_upper=2.5,
                         maxiters=5,
                         sigma_lower=0,
                     ).mask
                 ] += 1
-        self.star_mask = ~(hard_mask | (soft_mask / len(self.fnames) > 0.3))
+        hard_mask |= np.asarray(np.gradient(hard_mask.astype(float))).any(axis=0)
+        self.star_mask = ~(hard_mask | ~sat_mask | (soft_mask / len(self.fnames) > 0.3))
+        self.sat_mask = sat_mask
 
         # This mask will get used to build a regressor for tess jitter
         # self.jitter_mask =
@@ -316,24 +325,51 @@ class BackDrop(object):
         hdul = fits.HDUList([hdu0, hdu1, hdu2, hdu3, hdu4, hdu5])
         hdul[0].header["ORIGIN"] = "tess-backdrop"
         hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
+        hdul[0].header["VERSION"] = __version__
 
         for key in ["sector", "camera", "ccd", "nknots", "npoly", "degree"]:
-            hdul[0].header[key] = getattr(b, key)
+            hdul[0].header[key] = getattr(self, key)
 
         fname = (
             f"tessbackdrop_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
         )
-        dir = ""
+        dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.camera:02}/"
+        if not os.path.isdir(dir):
+            os.makedirs(dir)
+        hdul.writeto(dir + fname, overwrite=True)
 
     def load(self, sector, camera, ccd):
         """
         Load a model fit to the tess-backrop data directory
         """
-        raise NotImplementedError
+        dir = f"{PACKAGEDIR}/data/sector{sector:03}/camera{camera:02}/ccd{camera:02}/"
+        if not os.path.isdir(dir):
+            raise ValueError(
+                f"No solutions exist for Sector {sector}, Camera {camera}, CCD {ccd}."
+            )
+        fname = f"tessbackdrop_sector{sector}_camera{camera}_ccd{ccd}.fits"
+        with fits.open(dir + fname) as hdu:
+            for key in ["sector", "camera", "ccd", "nknots", "npoly", "degree"]:
+                setattr(self, key, hdu[0].header[key])
+            self.t_start = hdu[1].data["T_START"]
+            self.knots_wbounds = hdu[2].data["KNOTS"]
+            self.spline_w = hdu[3].data
+            self.strap_w = hdu[4].data
+            self.poly_w = hdu[5].data
 
     def _build_correction(self, column, row, time):
         """Builds a correction for an input column, row, and time array"""
-        raise NotImplementedError
+        c, r = np.meshgrid(column, row)
+        c, r = c / 2048 - 0.5, r / 2048 - 0.5
+
+        self._poly_X = np.asarray(
+            [
+                c.ravel() ** idx * r.ravel() ** jdx
+                for idx in np.arange(self.npoly)
+                for jdx in np.arange(self.npoly)
+            ]
+        ).T
+        self._spline_X = self._get_spline_matrix(column, row)
 
     def correct_tpf(self, tpf):
         """Returns a TPF with the background corrected"""
@@ -354,3 +390,90 @@ def _get_knots(x, nknots, degree):
         np.append([x.min()] * (degree - 1), knots), [x.max()] * (degree)
     )
     return knots_wbounds
+
+
+def _find_saturation_column_centers(mask):
+    """
+    Finds the center point of saturation columns.
+
+    Parameters
+    ----------
+    mask : np.ndarray of bools
+        Mask where True indicates a pixel is saturated
+
+    Returns
+    -------
+    centers : np.ndarray
+        Array of the centers in XY space for all the bleed columns
+    """
+    centers = []
+    radii = []
+    idxs = np.where(mask.any(axis=0))[0]
+    for idx in idxs:
+        line = mask[:, idx]
+        seq = []
+        val = line[0]
+        jdx = 0
+
+        while jdx <= len(line):
+            while line[jdx] == val:
+                jdx += 1
+                if jdx >= len(line):
+                    break
+
+            if jdx >= len(line):
+                break
+            seq.append(jdx)
+            val = line[jdx]
+        w = np.array_split(line, seq)
+        v = np.array_split(np.arange(len(line)), seq)
+        coords = [(idx, v1.mean().astype(int)) for v1, w1 in zip(v, w) if w1.all()]
+        rads = [len(v1) / 2 for v1, w1 in zip(v, w) if w1.all()]
+        for coord, rad in zip(coords, rads):
+            centers.append(coord)
+            radii.append(rad)
+    centers = np.asarray(centers)
+    radii = np.asarray(radii)
+    return centers, radii
+
+
+def get_saturation_mask(data):
+    """
+    Finds a mask that will remove saturated pixels, and any "whiskers".
+
+    Parameters
+    ----------
+    data : np.ndarray of shape (2048 x 2048)
+        Input TESS FFI
+
+    Returns
+    -------
+    sat_mask: np.ndarray of bools
+        The mask for saturated pixels. False where pixels are saturated.
+    """
+    grad = np.hypot(*np.gradient(data))
+    sat_cols = (np.abs(np.gradient(data)[1]) > 1e4) | (data > 1e5)
+
+    centers, radii = _find_saturation_column_centers(sat_cols)
+    whisker_mask = np.zeros((2048, 2048), bool)
+    for idx in np.arange(-3, 3):
+        for jdx in np.arange(-70, 70):
+
+            a1 = np.max([np.zeros(len(centers)), centers[:, 1] - idx], axis=0)
+            a1 = np.min([np.ones(len(centers)) * 2047, a1], axis=0)
+
+            b1 = np.max([np.zeros(len(centers)), centers[:, 0] - jdx], axis=0)
+            b1 = np.min([np.ones(len(centers)) * 2047, b1], axis=0)
+
+            whisker_mask[a1.astype(int), b1.astype(int)] = True
+
+    sat_mask = np.copy(sat_cols)
+    sat_mask |= np.gradient(sat_mask.astype(float), axis=0) != 0
+    for count in range(4):
+        sat_mask |= np.gradient(sat_mask.astype(float), axis=1) != 0
+    sat_mask |= whisker_mask
+
+    X, Y = np.mgrid[:2048, :2048]
+    for idx in range(len(centers)):
+        sat_mask |= np.hypot(X - centers[idx][1], Y - centers[idx][0]) < (radii[idx])
+    return ~sat_mask
