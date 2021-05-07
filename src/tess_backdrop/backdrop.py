@@ -386,10 +386,10 @@ class BackDrop(object):
             are between 45 and 2093.
         row : 1D np.ndarray of ints
             Array between 0 and 2048 indicating the row number.
-        times: None, or np.ndarray of floats
+        times: None, list of ints, or np.ndarray of floats
             Times to evaluate the background model at. If none, will evaluate at all
-            the times for available FFIs. Otherwise, must be an np.ndarray of floats
-            for the T_START time of the FFI.
+            the times for available FFIs. If array of ints, will use those indexes to the original FFIs.
+            Otherwise, must be an np.ndarray of floats for the T_START time of the FFI.
 
         Returns
         -------
@@ -405,17 +405,22 @@ class BackDrop(object):
         if times is None:
             tdxs = np.arange(len(self.t_start))
         else:
-            if not np.in1d(np.round(times, 6), np.round(self.t_start, 6)).all():
+            if not hasattr(times, "__iter__"):
+                times = [times]
+            if np.all([isinstance(i, (int, np.int64)) for i in times]):
+                tdxs = times
+            elif not np.in1d(np.round(times, 6), np.round(self.t_start, 6)).all():
                 raise ValueError(
                     "tess-backdrop can not estimate some times in the input `times` array. No background information at that time."
                 )
-            tdxs = np.asarray(
-                [
-                    np.where(np.round(self.t_start, 6) == np.round(t, 6))[0][0]
-                    for t in times
-                ]
-            )
-        """Builds a correction for an input column, row, and time array"""
+            else:
+                tdxs = np.asarray(
+                    [
+                        np.where(np.round(self.t_start, 6) == np.round(t, 6))[0][0]
+                        for t in times
+                    ]
+                )
+
         c, r = np.meshgrid(column, row)
         c, r = c / 2048 - 0.5, r / 2048 - 0.5
 
