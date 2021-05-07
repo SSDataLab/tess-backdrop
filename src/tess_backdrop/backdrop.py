@@ -7,6 +7,7 @@ import os
 from scipy.sparse import csr_matrix, vstack, hstack, lil_matrix
 from lightkurve.correctors.designmatrix import _spline_basis_vector
 from astropy.stats import sigma_clip
+import fitsio
 
 from . import PACKAGEDIR
 from .version import __version__
@@ -71,8 +72,12 @@ class BackDrop(object):
         hard_mask = np.zeros((2048, 2048), dtype=bool)
         soft_mask = np.zeros((2048, 2048), dtype=int)
 
+        # NOTE COLUMN NEEDS +45 EVENTUALLY
+        data = fitsio.read(self.fnames[0])[:2048, 45 : 2048 + 45]
+        sat_mask = get_saturation_mask(data)
+
         for fname in tqdm(self.fnames, desc="Building Pixel Mask"):
-            with fits.open(fname) as hdu:
+            with fits.open(fname, lazy_load_hdus=True) as hdu:
                 if fname == self.fnames[0]:
                     self.sector = int(self.reference_image.split("-s")[1].split("-")[0])
                     self.camera = hdu[1].header["camera"]
@@ -86,23 +91,17 @@ class BackDrop(object):
                 ):
                     raise ValueError("All files must have same sector, camera, ccd.")
 
-                # NOTE COLUMN NEEDS +45 EVENTUALLY
-                data = hdu[1].data[:2048, 45 : 2048 + 45]
-                if fname == self.fnames[0]:
-                    sat_mask = get_saturation_mask(data)
+            data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
+            grad = np.gradient(data)
 
-                grad = np.hypot(*np.gradient(data))
+            # This mask highlights pixels where there is a sharp flux gradient.
+            hard_mask |= (np.hypot(*grad) > 200) | (data > 2000)
+            sigma = _std_iter(grad[0], mask=hard_mask, sigma=2.5, n_iters=3)
+            soft_mask2 = grad[0] > (sigma * 2.5)
+            sigma = _std_iter(grad[1], mask=hard_mask, sigma=2.5, n_iters=3)
+            soft_mask2 |= grad[1] > (sigma * 2.5)
+            soft_mask[soft_mask2] += 1
 
-                # This mask highlights pixels where there is a sharp flux gradient.
-                hard_mask |= (grad > 300) | (data > 3000)
-                soft_mask[
-                    sigma_clip(
-                        np.ma.masked_array(grad, hard_mask),
-                        sigma_upper=2.5,
-                        maxiters=5,
-                        sigma_lower=0,
-                    ).mask
-                ] += 1
         hard_mask |= np.asarray(np.gradient(hard_mask.astype(float))).any(axis=0)
         self.star_mask = ~(hard_mask | ~sat_mask | (soft_mask / len(self.fnames) > 0.3))
         self.sat_mask = sat_mask
@@ -119,11 +118,11 @@ class BackDrop(object):
         except ValueError:
             pass
 
-        with fits.open(self.fnames[self.reference_frame]) as hdu:
-            data = hdu[1].data[:2048, 45 : 2048 + 45]
-            grad = np.asarray(np.gradient(data))
-            self.median_data = data[self.jitter_mask]
-            self.median_gradient = grad[:, self.jitter_mask]
+        #        with fits.open(self.fnames[self.reference_frame]) as hdu:
+        data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
+        grad = np.asarray(np.gradient(data))
+        self.median_data = data[self.jitter_mask]
+        self.median_gradient = grad[:, self.jitter_mask]
 
     def _build_matrices(self):
         """Allocate the matrices to fit the background.
@@ -236,7 +235,7 @@ class BackDrop(object):
 
     def _fit_frame(self, fname):
         """Helper function to fit a model to an individual frame. """
-        with fits.open(fname) as hdu:
+        with fits.open(fname, lazy_load_hdus=True) as hdu:
             if not np.all(
                 [
                     self.sector == int(fname.split("-s")[1].split("-")[0]),
@@ -248,40 +247,41 @@ class BackDrop(object):
                     f"FFI image is not part of Sector {self.sector}, Camera {self.camera}, CCD {self.ccd}"
                 )
 
-            # NOTE COLUMN NEEDS +45 EVENTUALLY
-            data = hdu[1].data[:2048, 45 : 2048 + 45]
-            t_start = hdu[0].header["TSTART"]
+        # NOTE COLUMN NEEDS +45 EVENTUALLY
+        data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
+        # data = hdu[1].data[:2048, 45 : 2048 + 45]
+        t_start = hdu[0].header["TSTART"]
 
-            avg = np.sum(
-                [
-                    data[idx :: self.nb, jdx :: self.nb]
-                    * self.star_mask[idx :: self.nb, jdx :: self.nb]
-                    for idx in range(self.nb)
-                    for jdx in range(self.nb)
-                ],
-                axis=0,
-            )
+        avg = np.sum(
+            [
+                data[idx :: self.nb, jdx :: self.nb]
+                * self.star_mask[idx :: self.nb, jdx :: self.nb]
+                for idx in range(self.nb)
+                for jdx in range(self.nb)
+            ],
+            axis=0,
+        )
 
-            avg /= self.weights
-            B = self._poly_X_down[self.weights.ravel() != 0].T.dot(
-                avg.ravel()[self.weights.ravel() != 0]
-            )
-            poly_w = np.linalg.solve(self.poly_sigma_w_inv, B)
-            res = data - self._poly_X.dot(poly_w).reshape((2048, 2048))
+        avg /= self.weights
+        B = self._poly_X_down[self.weights.ravel() != 0].T.dot(
+            avg.ravel()[self.weights.ravel() != 0]
+        )
+        poly_w = np.linalg.solve(self.poly_sigma_w_inv, B)
+        res = data - self._poly_X.dot(poly_w).reshape((2048, 2048))
 
-            # The spline and strap components should be small
-            # sigma_w_inv = self.XT[:, star_mask.ravel()].dot(
-            #        self.X[star_mask.ravel()]
-            #    ).toarray() + np.diag(1 / prior_sigma ** 2)
-            B = (
-                self.XmT.dot(res.ravel()[self.star_mask.ravel()])
-                + self.prior_mu / self.prior_sigma ** 2
-            )
-            w = np.linalg.solve(self.sigma_w_inv, B)
+        # The spline and strap components should be small
+        # sigma_w_inv = self.XT[:, star_mask.ravel()].dot(
+        #        self.X[star_mask.ravel()]
+        #    ).toarray() + np.diag(1 / prior_sigma ** 2)
+        B = (
+            self.XmT.dot(res.ravel()[self.star_mask.ravel()])
+            + self.prior_mu / self.prior_sigma ** 2
+        )
+        w = np.linalg.solve(self.sigma_w_inv, B)
 
-            spline_w = w[: self._spline_X.shape[1]].reshape((self.nknots, self.nknots))
-            strap_w = w[self._spline_X.shape[1] :]
-            jitter_pix = data[self.jitter_mask]
+        spline_w = w[: self._spline_X.shape[1]].reshape((self.nknots, self.nknots))
+        strap_w = w[self._spline_X.shape[1] :]
+        jitter_pix = data[self.jitter_mask]
 
         return (
             t_start,
@@ -357,7 +357,7 @@ class BackDrop(object):
                 f"No solutions exist for Sector {sector}, Camera {camera}, CCD {ccd}."
             )
         fname = f"tessbackdrop_sector{sector}_camera{camera}_ccd{ccd}.fits"
-        with fits.open(dir + fname) as hdu:
+        with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
             for key in ["sector", "camera", "ccd", "nknots", "npoly", "degree"]:
                 setattr(self, key, hdu[0].header[key])
             self.t_start = hdu[1].data["T_START"]
@@ -537,8 +537,8 @@ def get_saturation_mask(data):
 
     centers, radii = _find_saturation_column_centers(sat_cols)
     whisker_mask = np.zeros((2048, 2048), bool)
-    for idx in np.arange(-3, 3):
-        for jdx in np.arange(-70, 70):
+    for idx in np.arange(-2, 2):
+        for jdx in np.arange(-50, 50):
 
             a1 = np.max([np.zeros(len(centers)), centers[:, 1] - idx], axis=0)
             a1 = np.min([np.ones(len(centers)) * 2047, a1], axis=0)
@@ -555,6 +555,50 @@ def get_saturation_mask(data):
     sat_mask |= whisker_mask
 
     X, Y = np.mgrid[:2048, :2048]
-    for idx in range(len(centers)):
-        sat_mask |= np.hypot(X - centers[idx][1], Y - centers[idx][0]) < (radii[idx])
+
+    jdx = 0
+    kdx = 0
+    for jdx in range(8):
+        for kdx in range(8):
+            k = (
+                (centers[:, 1] > jdx * 256 - radii.max() - 1)
+                & (centers[:, 1] <= (jdx + 1) * 256 + radii.max() + 1)
+                & (centers[:, 0] > kdx * 256 - radii.max() - 1)
+                & (centers[:, 0] <= (kdx + 1) * 256 + radii.max() + 1)
+            )
+            if not (k).any():
+                continue
+            for idx in np.where(k)[0]:
+                x, y = (
+                    X[jdx * 256 : (jdx + 1) * 256, kdx * 256 : (kdx + 1) * 256]
+                    - centers[idx][1],
+                    Y[jdx * 256 : (jdx + 1) * 256, kdx * 256 : (kdx + 1) * 256]
+                    - centers[idx][0],
+                )
+                sat_mask[
+                    jdx * 256 : (jdx + 1) * 256, kdx * 256 : (kdx + 1) * 256
+                ] |= np.hypot(x, y) < (radii[idx])
+
+    # for idx in tqdm(range(len(centers)), desc="Building Saturation Mask"):
+    #     sat_mask |= np.hypot(X - centers[idx][1], Y - centers[idx][0]) < (radii[idx])
     return ~sat_mask
+
+
+def _std_iter(x, mask, sigma=3, n_iters=3):
+    """Iteratively finds the standard deviation of an array after sigma clipping
+    Parameters
+    ----------
+    x : np.ndarray
+        Array with average of zero
+    mask : np.ndarray of bool
+        Mask of same size as x, where True indicates a point to be masked.
+    sigma : int or float
+        The standard deviation at which to clip
+    n_iters : int
+        Number of iterations
+    """
+    m = mask.copy()
+    for iter in range(n_iters):
+        std = np.std(x[~m])
+        m |= np.abs(x) > (std * sigma)
+    return std

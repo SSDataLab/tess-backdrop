@@ -13,6 +13,7 @@ astropy = "^4.2.1"
 matplotlib = "^3.4.1"
 scipy = "^1.6.3"
 lightkurve = "^2.0.9"
+fitsio = "^1.1.4"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
@@ -24,6 +25,8 @@ mkdocs-material = "^7.1.1"
 mkdocstrings = "^0.15.0"
 pytkdocs = {version = "^0.11.1", extras = ["numpy-style"]}
 jupyterlab = "^3.0.14"
+fitsio = "^1.1.4"
+line-profiler = "^3.2.6"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
