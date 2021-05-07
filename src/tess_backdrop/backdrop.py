@@ -47,6 +47,8 @@ class BackDrop(object):
             Degree of spline to fit.
         nb: int
             Number of bins to downsample to for polynomial fit.
+        reference_frame: int
+            The index of the frame we'll use as the "reference" frame for the jitter model.
         """
 
         self.npoly = npoly
@@ -61,6 +63,11 @@ class BackDrop(object):
         self.knots_wbounds = _get_knots(np.arange(2048), nknots=nknots, degree=degree)
 
     def _build_mask(self):
+        """Builds a boolean mask for the input image stack which
+        1. Masks out very bright pixels (>3000 counts) or pixels with a sharp gradient (>300 counts)
+        2. Masks out pixels where there is a consistently outlying gradient in the image
+        3. Masks out saturated columns, including a wide halo, and a whisker mask.
+        """
         hard_mask = np.zeros((2048, 2048), dtype=bool)
         soft_mask = np.zeros((2048, 2048), dtype=int)
 
@@ -125,7 +132,9 @@ class BackDrop(object):
             self.median_gradient = grad[:, self.jitter_mask]
 
     def _build_matrices(self):
-        """ Allocate the matrices to fit the background """
+        """Allocate the matrices to fit the background.
+        When we want to build the matrices to evaluate this background model,
+        we will be able do so in a slightly more efficient way."""
         row, column = np.mgrid[:2048, :2048]
         c, r = column / 2048 - 0.5, row / 2048 - 0.5
 
@@ -179,6 +188,8 @@ class BackDrop(object):
         self.sigma_w_inv = self.XmT.dot(self.Xm) + np.diag(1 / self.prior_sigma ** 2)
 
     def _get_spline_matrix(self, xc, xr=None):
+        """Helper function to make a 2D spline matrix in a fairly memory efficient way."""
+
         def _X(x):
             matrices = [
                 csr_matrix(
@@ -230,6 +241,7 @@ class BackDrop(object):
             ) = self._fit_frame(fname)
 
     def _fit_frame(self, fname):
+        """Helper function to fit a model to an individual frame. """
         with fits.open(fname) as hdu:
             if not np.all(
                 [
@@ -296,7 +308,14 @@ class BackDrop(object):
 
     def save(self):
         """
-        Save a model fit to the tess-backrop data directory
+        Save a model fit to the tess-backrop data directory.
+        Will create a fits file containing the following extensions
+            1. Primary
+            2. T_START: The time array for each background solution
+            3. KNOTS: Knot spacing in row and column
+            4. SPLINE_W: Solution to the spline model. Has shape (ntimes x nknots x nknots)
+            5. STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
+            6. POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
         hdu0 = fits.PrimaryHDU()
         cols = [
@@ -330,7 +349,16 @@ class BackDrop(object):
 
     def load(self, sector, camera, ccd):
         """
-        Load a model fit to the tess-backrop data directory
+        Load a model fit to the tess-backrop data directory.
+
+        Parameters
+        ----------
+        sector: int
+            TESS sector number
+        camera: int
+            TESS camera number
+        ccd: int
+            TESS CCD number
         """
         dir = f"{PACKAGEDIR}/data/sector{sector:03}/camera{camera:02}/ccd{camera:02}/"
         if not os.path.isdir(dir):
@@ -347,7 +375,28 @@ class BackDrop(object):
             self.strap_w = hdu[4].data
             self.poly_w = hdu[5].data
 
-    def _build_correction(self, column, row, times=None):
+    def build_correction(self, column, row, times=None):
+        """Build a background correction for a given column, row and time array.
+
+        Parameters
+        ----------
+        column : 1D np.ndarray of ints
+            Array between 0 and 2048 indicating the column number.
+            NOTE: Columns in TESS FFIs and TPFs are offset by 45 pixels, and usually
+            are between 45 and 2093.
+        row : 1D np.ndarray of ints
+            Array between 0 and 2048 indicating the row number.
+        times: None, or np.ndarray of floats
+            Times to evaluate the background model at. If none, will evaluate at all
+            the times for available FFIs. Otherwise, must be an np.ndarray of floats
+            for the T_START time of the FFI.
+
+        Returns
+        -------
+        bkg : np.ndarray
+            2D array with shape ntimes x nrow x ncolumn containing the background
+            estimate for the input column, row and times.
+        """
         if not hasattr(self, "spline_w"):
             raise ValueError(
                 "tess-backdrop does not have any backdrop information. Do you need to `load` a backdrop file?"
@@ -399,6 +448,23 @@ class BackDrop(object):
 
 
 def _get_knots(x, nknots, degree):
+    """Find the b-spline knot spacing for an input array x, number of knots and degree
+
+    Parameters
+    ----------
+    x : np.ndarray
+        In put vector to create b-spline for
+    nknots : int
+        Number of knots to use in the b-spline
+    degree : int
+        Degree of the b-spline
+
+    Returns
+    -------
+    knots_wbounds : np.ndarray
+        The knot locations for the input x.
+    """
+
     knots = np.asarray(
         [s[-1] for s in np.array_split(np.argsort(x), nknots - degree)[:-1]]
     )

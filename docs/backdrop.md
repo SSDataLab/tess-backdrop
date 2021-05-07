@@ -5,9 +5,10 @@
     selection:
       members:
         - __init__
+        - load
+        - build_correction
         - fit_model
         - save
-        - load
     rendering:
       show_root_heading: false
       show_source: false
