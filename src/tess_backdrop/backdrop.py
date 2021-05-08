@@ -1,12 +1,10 @@
 from astropy.io import fits
-import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 import os
 
 from scipy.sparse import csr_matrix, vstack, hstack, lil_matrix
 from lightkurve.correctors.designmatrix import _spline_basis_vector
-from astropy.stats import sigma_clip
 import fitsio
 
 from . import PACKAGEDIR
@@ -308,6 +306,10 @@ class BackDrop(object):
             5. STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
             6. POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
+        if not hasattr(self, "star_mask"):
+            raise ValueError(
+                "It does not look like you have regenerated a tess_backdrop model, I do not think you want to save."
+            )
         hdu0 = fits.PrimaryHDU()
         cols = [
             fits.Column(
@@ -402,7 +404,8 @@ class BackDrop(object):
                 tdxs = times
             elif not np.in1d(np.round(times, 6), np.round(self.t_start, 6)).all():
                 raise ValueError(
-                    "tess-backdrop can not estimate some times in the input `times` array. No background information at that time."
+                    "tess-backdrop can not estimate some times in the input `times` array."
+                    "No background information at that time."
                 )
             else:
                 tdxs = np.asarray(
@@ -572,7 +575,6 @@ def get_saturation_mask(data):
     sat_mask: np.ndarray of bools
         The mask for saturated pixels. False where pixels are saturated.
     """
-    grad = np.hypot(*np.gradient(data))
     sat_cols = (np.abs(np.gradient(data)[1]) > 1e4) | (data > 1e5)
 
     centers, radii = _find_saturation_column_centers(sat_cols)
