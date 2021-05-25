@@ -259,6 +259,13 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#tess_backdrop.backdrop.BackDrop.build_correction" class="md-nav__link">
+    build_correction()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#tess_backdrop.backdrop.BackDrop.fit_model" class="md-nav__link">
     fit_model()
   </a>
@@ -322,6 +329,13 @@
         <li class="md-nav__item">
   <a href="#tess_backdrop.backdrop.BackDrop.__init__" class="md-nav__link">
     __init__()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tess_backdrop.backdrop.BackDrop.build_correction" class="md-nav__link">
+    build_correction()
   </a>
   
 </li>
@@ -449,6 +463,83 @@ Recommend ~4.</p></td>
         <td><p>Number of bins to downsample to for polynomial fit.</p></td>
         <td><code>8</code></td>
       </tr>
+      <tr>
+        <td><code>reference_frame</code></td>
+        <td><code>int</code></td>
+        <td><p>The index of the frame we'll use as the "reference" frame for the jitter model.</p></td>
+        <td><code>0</code></td>
+      </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="tess_backdrop.backdrop.BackDrop.build_correction" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">build_correction</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">column</span><span class="p">,</span> <span class="n">row</span><span class="p">,</span> <span class="n">times</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Build a background correction for a given column, row and time array.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>column</code></td>
+        <td><code>1D np.ndarray of ints</code></td>
+        <td><p>Array between 0 and 2048 indicating the column number.
+NOTE: Columns in TESS FFIs and TPFs are offset by 45 pixels, and usually
+are between 45 and 2093.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>row</code></td>
+        <td><code>1D np.ndarray of ints</code></td>
+        <td><p>Array between 0 and 2048 indicating the row number.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>times</code></td>
+        <td><code>None, list of ints, or np.ndarray of floats</code></td>
+        <td><p>Times to evaluate the background model at. If none, will evaluate at all
+the times for available FFIs. If array of ints, will use those indexes to the original FFIs.
+Otherwise, must be an np.ndarray of floats for the T_START time of the FFI.</p></td>
+        <td><code>None</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>np.ndarray</code></td>
+      <td><p>2D array with shape ntimes x nrow x ncolumn containing the background
+estimate for the input column, row and times.</p></td>
+    </tr>
   </tbody>
 </table>
     </div>
@@ -489,8 +580,39 @@ Recommend ~4.</p></td>
 
     <div class="doc doc-contents ">
 
-      <p>Load a model fit to the tess-backrop data directory</p>
+      <p>Load a model fit to the tess-backrop data directory.</p>
 
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>sector</code></td>
+        <td><code>int</code></td>
+        <td><p>TESS sector number</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>camera</code></td>
+        <td><code>int</code></td>
+        <td><p>TESS camera number</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>ccd</code></td>
+        <td><code>int</code></td>
+        <td><p>TESS CCD number</p></td>
+        <td><em>required</em></td>
+      </tr>
+  </tbody>
+</table>
     </div>
 
   </div>
@@ -509,7 +631,14 @@ Recommend ~4.</p></td>
 
     <div class="doc doc-contents ">
 
-      <p>Save a model fit to the tess-backrop data directory</p>
+      <p>Save a model fit to the tess-backrop data directory.</p>
+<p>Will create a fits file containing the following extensions
+    1. Primary
+    2. T_START: The time array for each background solution
+    3. KNOTS: Knot spacing in row and column
+    4. SPLINE_W: Solution to the spline model. Has shape (ntimes x nknots x nknots)
+    5. STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
+    6. POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)</p>
 
     </div>
 

@@ -234,7 +234,7 @@ class BackDrop(object):
             ) = self._fit_frame(fname)
 
     def _fit_frame(self, fname):
-        """Helper function to fit a model to an individual frame. """
+        """Helper function to fit a model to an individual frame."""
         with fits.open(fname, lazy_load_hdus=True) as hdu:
             if not np.all(
                 [
