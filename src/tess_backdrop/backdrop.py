@@ -1,12 +1,10 @@
 from astropy.io import fits
-import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 import os
 
 from scipy.sparse import csr_matrix, vstack, hstack, lil_matrix
 from lightkurve.correctors.designmatrix import _spline_basis_vector
-from astropy.stats import sigma_clip
 import fitsio
 
 from . import PACKAGEDIR
@@ -95,7 +93,7 @@ class BackDrop(object):
             grad = np.gradient(data)
 
             # This mask highlights pixels where there is a sharp flux gradient.
-            hard_mask |= (np.hypot(*grad) > 200) | (data > 2000)
+            hard_mask |= (np.hypot(*grad) > 300) | (data > 3000)
             sigma = _std_iter(grad[0], mask=hard_mask, sigma=2.5, n_iters=3)
             soft_mask2 = grad[0] > (sigma * 2.5)
             sigma = _std_iter(grad[1], mask=hard_mask, sigma=2.5, n_iters=3)
@@ -308,6 +306,10 @@ class BackDrop(object):
             5. STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
             6. POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
+        if not hasattr(self, "star_mask"):
+            raise ValueError(
+                "It does not look like you have regenerated a tess_backdrop model, I do not think you want to save."
+            )
         hdu0 = fits.PrimaryHDU()
         cols = [
             fits.Column(
@@ -333,7 +335,7 @@ class BackDrop(object):
         fname = (
             f"tessbackdrop_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
         )
-        dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.camera:02}/"
+        dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
         if not os.path.isdir(dir):
             os.makedirs(dir)
         hdul.writeto(dir + fname, overwrite=True)
@@ -351,7 +353,7 @@ class BackDrop(object):
         ccd: int
             TESS CCD number
         """
-        dir = f"{PACKAGEDIR}/data/sector{sector:03}/camera{camera:02}/ccd{camera:02}/"
+        dir = f"{PACKAGEDIR}/data/sector{sector:03}/camera{camera:02}/ccd{ccd:02}/"
         if not os.path.isdir(dir):
             raise ValueError(
                 f"No solutions exist for Sector {sector}, Camera {camera}, CCD {ccd}."
@@ -402,7 +404,8 @@ class BackDrop(object):
                 tdxs = times
             elif not np.in1d(np.round(times, 6), np.round(self.t_start, 6)).all():
                 raise ValueError(
-                    "tess-backdrop can not estimate some times in the input `times` array. No background information at that time."
+                    "tess-backdrop can not estimate some times in the input `times` array."
+                    "No background information at that time."
                 )
             else:
                 tdxs = np.asarray(
@@ -424,7 +427,7 @@ class BackDrop(object):
         ).T
         self._spline_X = self._get_spline_matrix(column, row)
         bkg = np.zeros((len(tdxs), len(row), len(column)))
-        for idx, tdx in enumerate(tqdm(tdxs)):
+        for idx, tdx in enumerate(tdxs):
             poly = self._poly_X.dot(self.poly_w[tdx].ravel()).reshape(
                 (row.shape[0], column.shape[0])
             )
@@ -435,12 +438,52 @@ class BackDrop(object):
             bkg[idx, :, :] = poly + spline + strap
         return bkg
 
-    def correct_tpf(self, tpf):
-        """Returns a TPF with the background corrected"""
-        # self.load(tpf.sector, tpf.camera, tpf.ccd)
-        # check if it's a 30 minute TPF, otherwise raise an error
+    def correct_tpf(self, tpf, exptime=None):
+        """Returns a TPF with the background corrected
 
-        raise NotImplementedError
+        Parameters
+        ----------
+        tpf : lk.TargetPixelFile
+            Target Pixel File object. Must be a TESS target pixel file, and must
+            be a 30 minute cadence.
+        exptime : float, None
+            The exposure time between each cadence. If None, will be generated from the data
+
+        Returns
+        -------
+        corrected_tpf : lk.TargetPixelFile
+            New TPF object, with the TESS background removed.
+        """
+        if exptime is None:
+            exptime = np.median(np.diff(tpf.time.value))
+        if exptime < 0.02:
+            raise ValueError(
+                "tess_backdrop can only correct 30 minute cadence FFIs currently."
+            )
+        if tpf.mission.lower() != "tess":
+            raise ValueError("tess_backdrop can only correct TESS TPFs.")
+
+        if not hasattr(self, "sector"):
+            self.load(sector=tpf.sector, camera=tpf.camera, ccd=tpf.ccd)
+        else:
+            if (
+                (self.sector != tpf.sector)
+                | (self.camera != tpf.camera)
+                | (self.ccd != tpf.ccd)
+            ):
+                self.load(sector=tpf.sector, camera=tpf.camera, ccd=tpf.ccd)
+
+        tdxs = [
+            np.argmin(np.abs((self.t_start - t) + exptime))
+            for t in tpf.time.value
+            if (np.min(np.abs((self.t_start - t) + exptime)) < exptime)
+        ]
+        bkg = self.build_correction(
+            np.arange(tpf.shape[2]) + tpf.column,
+            np.arange(tpf.shape[1]) + tpf.row,
+            times=tdxs,
+        )
+        return tpf - bkg
 
 
 def _get_knots(x, nknots, degree):
@@ -532,7 +575,6 @@ def get_saturation_mask(data):
     sat_mask: np.ndarray of bools
         The mask for saturated pixels. False where pixels are saturated.
     """
-    grad = np.hypot(*np.gradient(data))
     sat_cols = (np.abs(np.gradient(data)[1]) > 1e4) | (data > 1e5)
 
     centers, radii = _find_saturation_column_centers(sat_cols)
