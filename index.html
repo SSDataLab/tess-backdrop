@@ -222,8 +222,23 @@
   
   
     <li class="md-nav__item">
+      <a href="demo/" class="md-nav__link">
+        Example: Using tess_backdrop to correct a TESS cut TPF
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
       <a href="backdrop/" class="md-nav__link">
-        BackDrop
+        BackDrop API Docs
       </a>
     </li>
   
@@ -264,6 +279,17 @@
                 
                 
                 <h1 id="tess-backdrop">tess-backdrop</h1>
+<p><code>tess-backdrop</code> is a tool to 1) create a background correction for TESS images 2) apply a background correction to any block of TESS data.</p>
+<h1 id="what-does-tess_backdrop-make">What does <code>tess_backdrop</code> make?</h1>
+<p><code>tess_backdrop</code> makes sets of <em>fits</em> files for every TESS sector, camera and CCD. These fits files are quite small (10s of Mb) and contain all the information needed to create a scattered light background correction for any pixel, at any time. Below is an example of the sorts of corrections <code>tess_backdrop</code> makes.</p>
+<p><img alt="" src="example1.png" /></p>
+<p>Each of the background estimates is fast to evaluate for any given TESS FFI dataset. This means you can apply the scattered light correction really quickly, without having to download anything else from MAST.</p>
+<h2 id="how-is-it-fast">How is it fast?</h2>
+<p><code>tess_backdrop</code> creates a simple linear model of polynomials and splines (piece-wise polynomials) for the background. These polynomials can be built very quickly. We save the optimum weights for each component in the light weight <em>fits</em> files that come with the package. These polynomials are then simply evaluated at points requested by the user.</p>
+<h1 id="what-sort-of-model-is-tess_backdrop-building">What sort of model is <code>tess_backdrop</code> building?</h1>
+<p>To make the background estimate, we construct a model that is a simple, low order, 2D polynomial. We then allow for small deviations from this model, in the form of a pixel column offset (to model straps in the TESS detector) and a 2D spatial spline model. An example of the different components of the model for the example frame is given below.</p>
+<p><img alt="" src="example2.png" /></p>
+<p>These model components are summed to create the final model for a given frame. <code>tess_backdrop</code> builds the model from FFI images, having masked out stars and bleed columns/halos in the FFIs. <code>tess_backdrop</code> uses simple statistics for this clipping, and doesn't query any catalog for the positions of stars.</p>
                 
               
               
@@ -283,13 +309,13 @@
     <nav class="md-footer__inner md-grid" aria-label="Footer">
       
       
-        <a href="backdrop/" class="md-footer__link md-footer__link--next" rel="next">
+        <a href="demo/" class="md-footer__link md-footer__link--next" rel="next">
           <div class="md-footer__title">
             <div class="md-ellipsis">
               <span class="md-footer__direction">
                 Next
               </span>
-              BackDrop
+              Example: Using tess_backdrop to correct a TESS cut TPF
             </div>
           </div>
           <div class="md-footer__button md-icon">
