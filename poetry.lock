@@ -101,7 +101,7 @@ six = ">=1.6.1,<2.0"
 name = "async-generator"
 version = "1.10"
 description = "Async generators and context managers for Python 3.5+"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.5"
 
@@ -117,7 +117,7 @@ python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 name = "attrs"
 version = "20.3.0"
 description = "Classes Without Boilerplate"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 
@@ -199,7 +199,7 @@ d = ["aiohttp (>=3.3.2)", "aiohttp-cors"]
 name = "bleach"
 version = "3.3.0"
 description = "An easy safelist-based HTML-sanitizing tool."
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*"
 
@@ -311,7 +311,7 @@ python-versions = ">=3.5"
 name = "defusedxml"
 version = "0.7.1"
 description = "XML bomb protection for Python stdlib modules"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*"
 
@@ -338,7 +338,7 @@ python-versions = "~=3.5"
 name = "entrypoints"
 version = "0.3"
 description = "Discover and load entry points from installed packages."
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=2.7"
 
@@ -477,7 +477,7 @@ test = ["nose (>=0.10.1)", "requests", "testpath", "pygments", "nbformat", "ipyk
 name = "ipython-genutils"
 version = "0.2.0"
 description = "Vestigial utilities from IPython"
-category = "dev"
+category = "main"
 optional = false
 python-versions = "*"
 
@@ -557,7 +557,7 @@ dev = ["hypothesis"]
 name = "jsonschema"
 version = "3.2.0"
 description = "An implementation of JSON Schema validation for Python"
-category = "dev"
+category = "main"
 optional = false
 python-versions = "*"
 
@@ -574,7 +574,7 @@ format_nongpl = ["idna", "jsonpointer (>1.13)", "webcolors", "rfc3986-validator 
 name = "jupyter-client"
 version = "6.2.0"
 description = "Jupyter protocol implementation and client libraries"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.6.1"
 
@@ -594,7 +594,7 @@ test = ["async-generator", "ipykernel", "ipython", "mock", "pytest-asyncio", "py
 name = "jupyter-core"
 version = "4.7.1"
 description = "Jupyter core package. A base package on which Jupyter projects rely."
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.6"
 
@@ -674,7 +674,7 @@ test = ["pytest (>=6.0)", "pytest-cov", "pytest-console-scripts", "pytest-check-
 name = "jupyterlab-pygments"
 version = "0.1.2"
 description = "Pygments theme using JupyterLab CSS variables"
-category = "dev"
+category = "main"
 optional = false
 python-versions = "*"
 
@@ -701,6 +701,24 @@ requests = "*"
 
 [package.extras]
 test = ["codecov", "ipykernel", "pytest (>=5.3.2)", "pytest-cov", "jupyter-server", "openapi-core", "pytest-console-scripts", "strict-rfc3339", "ruamel.yaml", "wheel"]
+
+[[package]]
+name = "jupytext"
+version = "1.11.2"
+description = "Jupyter notebooks as Markdown documents, Julia, Python or R scripts"
+category = "main"
+optional = false
+python-versions = "~=3.6"
+
+[package.dependencies]
+markdown-it-py = {version = ">=1.0.0b3,<2.0.0", extras = ["plugins"]}
+nbformat = "*"
+pyyaml = "*"
+toml = "*"
+
+[package.extras]
+rst2md = ["sphinx-gallery (>=0.7.0,<0.8.0)"]
+toml = ["toml"]
 
 [[package]]
 name = "keyring"
@@ -810,6 +828,26 @@ python-versions = ">=3.6"
 testing = ["coverage", "pyyaml"]
 
 [[package]]
+name = "markdown-it-py"
+version = "1.1.0"
+description = "Python port of markdown-it. Markdown parsing, done right!"
+category = "main"
+optional = false
+python-versions = "~=3.6"
+
+[package.dependencies]
+attrs = ">=19,<22"
+mdit-py-plugins = {version = "*", optional = true, markers = "extra == \"plugins\""}
+
+[package.extras]
+code_style = ["pre-commit (==2.6)"]
+compare = ["commonmark (>=0.9.1,<0.10.0)", "markdown (>=3.2.2,<3.3.0)", "mistletoe-ebp (>=0.10.0,<0.11.0)", "mistune (>=0.8.4,<0.9.0)", "panflute (>=1.12,<2.0)"]
+linkify = ["linkify-it-py (>=1.0,<2.0)"]
+plugins = ["mdit-py-plugins"]
+rtd = ["myst-nb (==0.13.0a1)", "pyyaml", "sphinx (>=2,<4)", "sphinx-copybutton", "sphinx-panels (>=0.4.0,<0.5.0)", "sphinx-book-theme"]
+testing = ["coverage", "psutil", "pytest (>=3.6,<4)", "pytest-benchmark (>=3.2,<4.0)", "pytest-cov", "pytest-regressions"]
+
+[[package]]
 name = "markupsafe"
 version = "1.1.1"
 description = "Safely add untrusted strings to HTML/XML markup."
@@ -853,6 +891,22 @@ optional = false
 python-versions = "*"
 
 [[package]]
+name = "mdit-py-plugins"
+version = "0.2.8"
+description = "Collection of plugins for markdown-it-py"
+category = "main"
+optional = false
+python-versions = "~=3.6"
+
+[package.dependencies]
+markdown-it-py = ">=1.0,<2.0"
+
+[package.extras]
+code_style = ["pre-commit (==2.6)"]
+rtd = ["myst-parser (==0.14.0a3)", "sphinx-book-theme (>=0.1.0,<0.2.0)"]
+testing = ["coverage", "pytest (>=3.6,<4)", "pytest-cov", "pytest-regressions"]
+
+[[package]]
 name = "memoization"
 version = "0.3.2"
 description = "A powerful caching library for Python, with TTL support and multiple algorithm options. (https://github.com/lonelyenvoy/python-memoization)"
@@ -864,7 +918,7 @@ python-versions = ">=3, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, <4"
 name = "mistune"
 version = "0.8.4"
 description = "The fastest markdown parser in pure Python"
-category = "dev"
+category = "main"
 optional = false
 python-versions = "*"
 
@@ -896,6 +950,23 @@ python-versions = ">=3.6,<4.0"
 [package.dependencies]
 Markdown = ">=3.3,<4.0"
 mkdocs = ">=1.1,<2.0"
+
+[[package]]
+name = "mkdocs-jupyter"
+version = "0.17.3"
+description = ""
+category = "main"
+optional = false
+python-versions = ">=3.7"
+
+[package.dependencies]
+jupytext = ">=1.11.0,<2"
+mkdocs = ">=1.1.0,<2"
+nbconvert = ">=6.0.7,<7"
+
+[package.extras]
+dev = ["setuptools", "setuptools-scm", "pylint", "flake8", "black", "isort", "twine", "wheel", "jupyterlab", "pandas", "matplotlib", "plotly", "bokeh", "ipywidgets", "mkdocs (>=1.1.0,<2)", "nbconvert (>=6.0.7,<7)", "jupytext (>=1.11.0,<2)", "pytest", "pytest-cov", "mkdocs-material", "mkdocs-minify-plugin", "pygments", "pymdown-extensions"]
+test = ["pytest", "pytest-cov", "toml"]
 
 [[package]]
 name = "mkdocs-material"
@@ -975,7 +1046,7 @@ test = ["pytest", "pytest-tornasync", "pytest-console-scripts"]
 name = "nbclient"
 version = "0.5.3"
 description = "A client library for executing notebooks. Formerly nbconvert's ExecutePreprocessor."
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.6.1"
 
@@ -995,7 +1066,7 @@ test = ["codecov", "coverage", "ipython", "ipykernel", "ipywidgets", "pytest (>=
 name = "nbconvert"
 version = "6.0.7"
 description = "Converting Jupyter Notebooks"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.6"
 
@@ -1025,7 +1096,7 @@ webpdf = ["pyppeteer (==0.2.2)"]
 name = "nbformat"
 version = "5.1.3"
 description = "The Jupyter Notebook format"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.5"
 
@@ -1043,7 +1114,7 @@ test = ["check-manifest", "fastjsonschema", "testpath", "pytest", "pytest-cov"]
 name = "nest-asyncio"
 version = "1.5.1"
 description = "Patch asyncio to allow nested event loops"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.5"
 
@@ -1150,7 +1221,7 @@ test = ["pytest (>=5.0.1)", "pytest-xdist", "hypothesis (>=3.58)"]
 name = "pandocfilters"
 version = "1.4.3"
 description = "Utilities for writing pandoc filters in python"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 
@@ -1258,7 +1329,7 @@ python-versions = "*"
 name = "py"
 version = "1.10.0"
 description = "library with cross-python path, ini-parsing, io, code, log facilities"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 
@@ -1332,7 +1403,7 @@ python-versions = ">=2.6, !=3.0.*, !=3.1.*, !=3.2.*"
 name = "pyrsistent"
 version = "0.17.3"
 description = "Persistent/Functional/Immutable data structures"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.5"
 
@@ -1396,7 +1467,7 @@ python-versions = "*"
 name = "pywin32"
 version = "300"
 description = "Python for Window Extensions"
-category = "dev"
+category = "main"
 optional = false
 python-versions = "*"
 
@@ -1428,7 +1499,7 @@ python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*, !=3.5.*"
 name = "pyzmq"
 version = "22.0.3"
 description = "Python bindings for 0MQ"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.6"
 
@@ -1557,7 +1628,7 @@ test = ["pytest"]
 name = "testpath"
 version = "0.4.4"
 description = "Test utilities for code working with files and commands"
-category = "dev"
+category = "main"
 optional = false
 python-versions = "*"
 
@@ -1576,7 +1647,7 @@ python-versions = ">=3.5"
 name = "toml"
 version = "0.10.2"
 description = "Python Library for Tom's Obvious, Minimal Language"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=2.6, !=3.0.*, !=3.1.*, !=3.2.*"
 
@@ -1613,7 +1684,7 @@ telegram = ["requests"]
 name = "traitlets"
 version = "5.0.5"
 description = "Traitlets Python configuration system"
-category = "dev"
+category = "main"
 optional = false
 python-versions = ">=3.7"
 
@@ -1700,7 +1771,7 @@ testing = ["pytest (>=4.6)", "pytest-checkdocs (>=1.2.3)", "pytest-flake8", "pyt
 [metadata]
 lock-version = "1.1"
 python-versions = ">=3.8,<3.10"
-content-hash = "98e953f8793a288b788ae95a805ffcb343bce5152338812a717f5f13332afbaf"
+content-hash = "b5a20cebd0c60767ca10f97025ab5005d5a0a9034ada35781d62a87f0959ec65"
 
 [metadata.files]
 anyio = [
@@ -1984,6 +2055,10 @@ jupyterlab-server = [
     {file = "jupyterlab_server-2.5.0-py3-none-any.whl", hash = "sha256:c29784df3269d45f54a1e23e041ae9e8638773fa6b11095938b4d30bec1c75c6"},
     {file = "jupyterlab_server-2.5.0.tar.gz", hash = "sha256:4c2c482cc91b7439ea5415f8f85ded95059fb9cdab03f5f0e6338246830c2a5c"},
 ]
+jupytext = [
+    {file = "jupytext-1.11.2-py3-none-any.whl", hash = "sha256:184e44c2ea91a85f323d8190bd13d9dfb3b73e8d2a92d239cf5e489c98ca3605"},
+    {file = "jupytext-1.11.2.tar.gz", hash = "sha256:7a32aa9edbc430653de3149de79c4ff4ee33ded2119b41ed476b5c93c9f6aff1"},
+]
 keyring = [
     {file = "keyring-23.0.1-py3-none-any.whl", hash = "sha256:8f607d7d1cc502c43a932a275a56fe47db50271904513a379d39df1af277ac48"},
     {file = "keyring-23.0.1.tar.gz", hash = "sha256:045703609dd3fccfcdb27da201684278823b72af515aedec1a8515719a038cb8"},
@@ -2047,6 +2122,10 @@ lunr = [
 markdown = [
     {file = "Markdown-3.3.4-py3-none-any.whl", hash = "sha256:96c3ba1261de2f7547b46a00ea8463832c921d3f9d6aba3f255a6f71386db20c"},
     {file = "Markdown-3.3.4.tar.gz", hash = "sha256:31b5b491868dcc87d6c24b7e3d19a0d730d59d3e46f4eea6430a321bed387a49"},
+]
+markdown-it-py = [
+    {file = "markdown-it-py-1.1.0.tar.gz", hash = "sha256:36be6bb3ad987bfdb839f5ba78ddf094552ca38ccbd784ae4f74a4e1419fc6e3"},
+    {file = "markdown_it_py-1.1.0-py3-none-any.whl", hash = "sha256:98080fc0bc34c4f2bcf0846a096a9429acbd9d5d8e67ed34026c03c61c464389"},
 ]
 markupsafe = [
     {file = "MarkupSafe-1.1.1-cp27-cp27m-macosx_10_6_intel.whl", hash = "sha256:09027a7803a62ca78792ad89403b1b7a73a01c8cb65909cd876f7fcebd79b161"},
@@ -2131,6 +2210,10 @@ mccabe = [
     {file = "mccabe-0.6.1-py2.py3-none-any.whl", hash = "sha256:ab8a6258860da4b6677da4bd2fe5dc2c659cff31b3ee4f7f5d64e79735b80d42"},
     {file = "mccabe-0.6.1.tar.gz", hash = "sha256:dd8d182285a0fe56bace7f45b5e7d1a6ebcbf524e8f3bd87eb0f125271b8831f"},
 ]
+mdit-py-plugins = [
+    {file = "mdit-py-plugins-0.2.8.tar.gz", hash = "sha256:5991cef645502e80a5388ec4fc20885d2313d4871e8b8e320ca2de14ac0c015f"},
+    {file = "mdit_py_plugins-0.2.8-py3-none-any.whl", hash = "sha256:1833bf738e038e35d89cb3a07eb0d227ed647ce7dd357579b65343740c6d249c"},
+]
 memoization = [
     {file = "memoization-0.3.2-py3-none-any.whl", hash = "sha256:6109bcfdbd6fc6c33004fcdc5d8e291c1223a7416c5dad61ec777d260f6038d2"},
     {file = "memoization-0.3.2.tar.gz", hash = "sha256:65d19404b9acc74a764d3e584d8fb17c56bc446d386a28afb93f2247507c99cc"},
@@ -2146,6 +2229,9 @@ mkdocs = [
 mkdocs-autorefs = [
     {file = "mkdocs-autorefs-0.1.1.tar.gz", hash = "sha256:ff9386ceb1ceeb88786696c7534ec31a6248a4828a5a2f8fea9d2699f650e3ab"},
     {file = "mkdocs_autorefs-0.1.1-py3-none-any.whl", hash = "sha256:8bed8e81db45bb8d25e30e09d9d2943a7ceb92d3ad6b51e84618027c55c398eb"},
+]
+mkdocs-jupyter = [
+    {file = "mkdocs-jupyter-0.17.3.tar.gz", hash = "sha256:04c4d3fbaf0ce93e2bd5246a649b46c3d1a93137e252f7d5048db9db62d0f822"},
 ]
 mkdocs-material = [
     {file = "mkdocs-material-7.1.3.tar.gz", hash = "sha256:e34bba93ad1a0e6f9afc371f4ef55bedabbf13b9a786b013b0ce26ac55ec2932"},
