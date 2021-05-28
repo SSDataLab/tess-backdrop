@@ -2,6 +2,8 @@ from astropy.io import fits
 import numpy as np
 from tqdm import tqdm
 import os
+import pandas as pd
+from fbpca import pca
 
 from scipy.sparse import csr_matrix, vstack, hstack, lil_matrix
 from lightkurve.correctors.designmatrix import _spline_basis_vector
@@ -230,6 +232,8 @@ class BackDrop(object):
                 self.strap_w[idx, :],
                 self.jitter_pix[idx, :],
             ) = self._fit_frame(fname)
+        # Smaller version of jitter for use later
+        self.jitter = pca(self.jitter_pix, 20, n_iter=100)[0]
 
     def _fit_frame(self, fname):
         """Helper function to fit a model to an individual frame."""
@@ -340,6 +344,18 @@ class BackDrop(object):
             os.makedirs(dir)
         hdul.writeto(dir + fname, overwrite=True)
 
+        hdu0 = fits.PrimaryHDU()
+        hdu1 = fits.ImageHDU(self.jitter, name="jitter_pix")
+        hdul = fits.HDUList([hdu0, hdu1])
+        hdul[0].header["ORIGIN"] = "tess-backdrop"
+        hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
+        hdul[0].header["VERSION"] = __version__
+        for key in ["sector", "camera", "ccd", "nknots", "npoly", "degree"]:
+            hdul[0].header[key] = getattr(self, key)
+        fname = f"tessbackdrop_jitter_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+        dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+        hdul.writeto(dir + fname, overwrite=True)
+
     def load(self, sector, camera, ccd):
         """
         Load a model fit to the tess-backrop data directory.
@@ -367,6 +383,32 @@ class BackDrop(object):
             self.spline_w = hdu[3].data
             self.strap_w = hdu[4].data
             self.poly_w = hdu[5].data
+
+        fname = f"tessbackdrop_jitter_sector{sector}_camera{camera}_ccd{ccd}.fits"
+        with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
+            self.jitter = hdu[1].data
+
+    def list_available(self):
+        """List the sectors, cameras and CCDs that
+        are available to you via the `load` method.
+
+        If there is a sector that is not available that you need,
+        you can create a solution using the TESS FFIs, and then use the
+        `save` method."""
+
+        df = pd.DataFrame(columns=["Sector", "Camera", "CCD"])
+        idx = 0
+        for sector in np.arange(200):
+            for camera in np.arange(1, 5):
+                for ccd in np.arange(1, 5):
+                    dir = f"{PACKAGEDIR}/data/sector{sector:03}/camera{camera:02}/ccd{ccd:02}/"
+                    if not os.path.isdir(dir):
+                        continue
+                    fname = f"tessbackdrop_sector{sector}_camera{camera}_ccd{ccd}.fits"
+                    if os.path.isfile(dir + fname):
+                        df.loc[idx] = np.hstack([sector, camera, ccd])
+                        idx += 1
+        return df
 
     def build_correction(self, column, row, times=None):
         """Build a background correction for a given column, row and time array.

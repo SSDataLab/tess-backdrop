@@ -8,3 +8,4 @@ PACKAGEDIR = os.path.abspath(os.path.dirname(__file__))
 
 from .version import __version__  # noqa
 from .backdrop import BackDrop  # noqa
+from .tesscutcorrector import TESSCutCorrector  # noqa
