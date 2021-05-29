@@ -1,9 +1,6 @@
 """Corrector function for TESSCut TPFs"""
 import lightkurve as lk
 import numpy as np
-
-from fbpca import pca
-from astropy.stats import sigma_clipped_stats
 from .backdrop import BackDrop
 
 
@@ -114,7 +111,7 @@ class TESSCutCorrector(lk.RegressionCorrector):
         )
         if cadence_mask is None:
             cadence_mask = np.ones(len(self.lc.time), bool)
-        clc = super().correct(
+        super().correct(
             dm,
             cadence_mask=cadence_mask & ~bad,
             sigma=sigma,
