@@ -19,10 +19,11 @@ class TESSCutCorrector(lk.RegressionCorrector):
         # `lc.remove_nans()` here because we need to mask both lc & tpf.
         nan_mask = np.isnan(lc.flux)
         lc = lc[~nan_mask]
-        self.tpf = tpf[~nan_mask]
         self.b = BackDrop()
         self.b.load(tpf.sector, tpf.camera, tpf.ccd)
-        super().__init__(lc=lc)
+        self.tpf = self.b.correct_tpf(tpf)[~nan_mask]
+        self.lc = self.tpf.to_lightcurve(aperture_mask=aperture_mask)
+        super().__init__(lc=self.lc)
 
     def __repr__(self):
         if self.lc.label == "":
@@ -87,10 +88,12 @@ class TESSCutCorrector(lk.RegressionCorrector):
             np.arange(self.tpf.shape[1]) + self.tpf.row,
         )
         dm_bkg = lk.DesignMatrix(
-            bkg[:, self.aperture_mask].sum(axis=1),
+            np.vstack(
+                [bkg[:, self.aperture_mask].sum(axis=1) ** idx for idx in range(2)]
+            ).T,
             name="sky",
-            prior_mu=[1],
-            prior_sigma=[0.02],
+            prior_mu=[0, 0],
+            prior_sigma=[0.01, 0.01 ** 2],
         )
 
         # Jitter DM
@@ -98,14 +101,17 @@ class TESSCutCorrector(lk.RegressionCorrector):
             self.b.jitter[:, :npca_components],
             name="jitter",
             prior_mu=np.zeros(npca_components),
-            prior_sigma=np.ones(npca_components) * self.lc.flux.value.mean() * 0.1,
+            prior_sigma=np.ones(npca_components) * self.lc.flux.value.mean() * 0.01,
         )
 
         dm = lk.SparseDesignMatrixCollection(
             [dm_bkg.to_sparse(), dm_jitter.to_sparse(), dm_spline]
         )
 
-        bad = (self.tpf.quality & lk.utils.TessQualityFlags.DEFAULT_BITMASK) != 0
+        bad = ~lk.utils.TessQualityFlags.create_quality_mask(
+            self.lc.quality,
+            self.tpf.quality & lk.utils.TessQualityFlags.DEFAULT_BITMASK,
+        )
         if cadence_mask is None:
             cadence_mask = np.ones(len(self.lc.time), bool)
         clc = super().correct(
@@ -115,8 +121,11 @@ class TESSCutCorrector(lk.RegressionCorrector):
             niters=niters,
             propagate_errors=propagate_errors,
         )
-
-        clc += self.diagnostic_lightcurves["spline"]
-        clc -= np.median(clc.flux)
-        clc += np.percentile(self.lc.flux, 10)
-        return clc
+        # clc += self.diagnostic_lightcurves["spline"]
+        # clc -= np.median(clc.flux)
+        # clc += np.percentile(self.lc.flux, 10)
+        return (
+            self.lc.copy()
+            - self.diagnostic_lightcurves["jitter"]
+            - self.diagnostic_lightcurves["sky"]
+        )
