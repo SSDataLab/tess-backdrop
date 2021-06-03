@@ -4,7 +4,7 @@
     handler: python
     selection:
       members:
-        - __init__
+        - BackDrop
         - load
         - build_correction
         - fit_model

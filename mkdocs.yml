@@ -1,8 +1,10 @@
 site_name: TESS Backdrop
 nav:
     - Home: index.md
-    - Demo: demo.ipynb
+    - DemoTPF: demo.ipynb
+    - DemoLightCurve: lightcurve-example.ipynb
     - BackDrop API Docs: backdrop.md
+    - Corrector API Docs: corrector.md
 
 theme:
   name: "material"

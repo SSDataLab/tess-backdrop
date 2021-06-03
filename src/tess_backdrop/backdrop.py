@@ -9,6 +9,7 @@ from scipy.sparse import csr_matrix, vstack, hstack, lil_matrix
 from lightkurve.correctors.designmatrix import _spline_basis_vector
 import fitsio
 
+from astropy.stats import sigma_clip, sigma_clipped_stats
 from . import PACKAGEDIR
 from .version import __version__
 
@@ -22,6 +23,19 @@ class BackDrop(object):
     2. A 2D b-spline to remove high spatial frequency noise
     3. A model for strap offsets.
 
+    Parameters
+    ----------
+    fnames: list of str, or list of astropy.io.fits objects
+        Input TESS FFIs
+    npoly: int
+        The order of polynomial to fit to the data in both x and y dimension.
+        Recommend ~4.
+    nknots: int
+        Number of knots to fit in each dimension. Recommend ~40.
+    degree: int
+        Degree of spline to fit.
+    nb: int
+        Number of bins to downsample to for polynomial fit.
     """
 
     def __init__(
@@ -31,7 +45,7 @@ class BackDrop(object):
         nknots=40,
         degree=3,
         nb=8,
-        reference_frame=0,
+        #        reference_frame=0,
     ):
 
         """
@@ -48,8 +62,6 @@ class BackDrop(object):
             Degree of spline to fit.
         nb: int
             Number of bins to downsample to for polynomial fit.
-        reference_frame: int
-            The index of the frame we'll use as the "reference" frame for the jitter model.
         """
 
         self.npoly = npoly
@@ -58,9 +70,9 @@ class BackDrop(object):
         self.fnames = fnames
         self.nknots = nknots
         self.nb = nb
-        self.reference_frame = reference_frame
-        if self.fnames is not None:
-            self.reference_image = self.fnames[self.reference_frame]
+        #        self.reference_frame = reference_frame
+        #        if self.fnames is not None:
+        #            self.reference_image = self.fnames[self.reference_frame]
         self.knots_wbounds = _get_knots(np.arange(2048), nknots=nknots, degree=degree)
 
     def _build_mask(self):
@@ -73,13 +85,12 @@ class BackDrop(object):
         soft_mask = np.zeros((2048, 2048), dtype=int)
 
         # NOTE COLUMN NEEDS +45 EVENTUALLY
-        data = fitsio.read(self.fnames[0])[:2048, 45 : 2048 + 45]
-        sat_mask = get_saturation_mask(data)
-
+        #        data = fitsio.read(self.fnames[0])[:2048, 45 : 2048 + 45]
+        sat_mask = None
         for fname in tqdm(self.fnames, desc="Building Pixel Mask"):
             with fits.open(fname, lazy_load_hdus=True) as hdu:
                 if fname == self.fnames[0]:
-                    self.sector = int(self.reference_image.split("-s")[1].split("-")[0])
+                    self.sector = int(fname.split("-s")[1].split("-")[0])
                     self.camera = hdu[1].header["camera"]
                     self.ccd = hdu[1].header["ccd"]
                 if not np.all(
@@ -92,16 +103,33 @@ class BackDrop(object):
                     raise ValueError("All files must have same sector, camera, ccd.")
 
             data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
+            # Blown out frames don't count towards mask
+            if (data > 1500).sum() / (2048 ** 2) > 0.1:
+                continue
+            if (data < -10).sum() / (2048 ** 2) > 0.1:
+                continue
+
+            # If there's a significant portion of the data that would be removed by the hard mask,
+            # Skip this frame.
             grad = np.gradient(data)
+            hm = (np.hypot(*grad) > 300) | (data > 3000)
+            if (hm.sum() / (2048 ** 2)) > 0.1:
+                continue
+
+            if sat_mask is None:
+                sat_mask = get_saturation_mask(data)
 
             # This mask highlights pixels where there is a sharp flux gradient.
-            hard_mask |= (np.hypot(*grad) > 300) | (data > 3000)
+            hard_mask |= hm
             sigma = _std_iter(grad[0], mask=hard_mask, sigma=2.5, n_iters=3)
             soft_mask2 = grad[0] > (sigma * 2.5)
             sigma = _std_iter(grad[1], mask=hard_mask, sigma=2.5, n_iters=3)
             soft_mask2 |= grad[1] > (sigma * 2.5)
             soft_mask[soft_mask2] += 1
 
+            # import pdb
+            #
+            # pdb.set_trace()
         hard_mask |= np.asarray(np.gradient(hard_mask.astype(float))).any(axis=0)
         self.star_mask = ~(hard_mask | ~sat_mask | (soft_mask / len(self.fnames) > 0.3))
         self.sat_mask = sat_mask
@@ -207,6 +235,10 @@ class BackDrop(object):
         return Xf
 
     def __repr__(self):
+        if hasattr(self, "sector"):
+            return (
+                f"BackDrop [Sector {self.sector}, Camera {self.camera}, CCD {self.ccd}]"
+            )
         return "BackDrop"
 
     def fit_model(self):
@@ -233,7 +265,15 @@ class BackDrop(object):
                 self.jitter_pix[idx, :],
             ) = self._fit_frame(fname)
         # Smaller version of jitter for use later
-        self.jitter = pca(self.jitter_pix, 20, n_iter=100)[0]
+
+        bad = sigma_clip(np.gradient(self.jitter_pix, axis=1).std(axis=1), sigma=5).mask
+        _, med, std = sigma_clipped_stats(self.jitter_pix[~bad], axis=0)
+        j = (np.copy(self.jitter_pix) - med) / std
+        j[j > 10] = 0
+        U, s, V = pca(j[~bad], 20, n_iter=100)
+        X = np.zeros((self.jitter_pix.shape[0], U.shape[1]))
+        X[~bad] = np.copy(U)
+        self.jitter = X
 
     def _fit_frame(self, fname):
         """Helper function to fit a model to an individual frame."""
@@ -283,7 +323,7 @@ class BackDrop(object):
 
         spline_w = w[: self._spline_X.shape[1]].reshape((self.nknots, self.nknots))
         strap_w = w[self._spline_X.shape[1] :]
-        jitter_pix = data[self.jitter_mask]
+        jitter_pix = res[self.jitter_mask]
 
         return (
             t_start,
@@ -302,13 +342,14 @@ class BackDrop(object):
     def save(self):
         """
         Save a model fit to the tess-backrop data directory.
+
         Will create a fits file containing the following extensions
-            1. Primary
-            2. T_START: The time array for each background solution
-            3. KNOTS: Knot spacing in row and column
-            4. SPLINE_W: Solution to the spline model. Has shape (ntimes x nknots x nknots)
-            5. STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
-            6. POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
+            - Primary
+            - T_START: The time array for each background solution
+            - KNOTS: Knot spacing in row and column
+            - SPLINE_W: Solution to the spline model. Has shape (ntimes x nknots x nknots)
+            - STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
+            - POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
         if not hasattr(self, "star_mask"):
             raise ValueError(
@@ -520,6 +561,12 @@ class BackDrop(object):
             for t in tpf.time.value
             if (np.min(np.abs((self.t_start - t) + exptime)) < exptime)
         ]
+
+        tdxs = [
+            np.argmin(np.abs((tpf.time.value - t) + exptime))
+            for t in self.t_start
+            if (np.min(np.abs((tpf.time.value - t) + exptime)) < exptime)
+        ]
         bkg = self.build_correction(
             np.arange(tpf.shape[2]) + tpf.column,
             np.arange(tpf.shape[1]) + tpf.row,
@@ -661,7 +708,7 @@ def get_saturation_mask(data):
                 )
                 sat_mask[
                     jdx * 256 : (jdx + 1) * 256, kdx * 256 : (kdx + 1) * 256
-                ] |= np.hypot(x, y) < (radii[idx])
+                ] |= np.hypot(x, y) < (np.min([radii[idx], 70]))
 
     # for idx in tqdm(range(len(centers)), desc="Building Saturation Mask"):
     #     sat_mask |= np.hypot(X - centers[idx][1], Y - centers[idx][0]) < (radii[idx])

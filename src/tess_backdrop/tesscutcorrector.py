@@ -5,9 +5,29 @@ from .backdrop import BackDrop
 
 
 class TESSCutCorrector(lk.RegressionCorrector):
-    """Corrector for TESSCut TPFs"""
+    """Remove TESS jitter and sky background noise using linear regression.
+
+    Will automatically generate a design matrix based on `tess_backdrop` stored files.
+
+    Parameters
+    ----------
+    tpf : `lightkurve.TargetPixelFile`
+        The target pixel file for a target
+    aperture_mask : np.ndarray of booleans
+        Aperture mask to apply to TPF. If none, one will be
+        selected per `lightkurve` defaults.
+    """
 
     def __init__(self, tpf, aperture_mask=None):
+        """
+        Parameters
+        ----------
+        tpf : `lightkurve.TargetPixelFile`
+            The target pixel file for a target
+        aperture_mask : np.ndarray of booleans
+            Aperture mask to apply to TPF. If none, one will be
+            selected per `lightkurve` defaults.
+        """
         if aperture_mask is None:
             aperture_mask = tpf.create_threshold_mask(3)
         self.aperture_mask = aperture_mask
@@ -61,10 +81,14 @@ class TESSCutCorrector(lk.RegressionCorrector):
 
         Returns
         -------
-        clc : `.LightCurve`
-            Systematics-corrected `.LightCurve`.
+        clc : `lightkurve.LightCurve`
+            Systematics-corrected `lightkurve.LightCurve`.
         """
 
+        bad = ~lk.utils.TessQualityFlags.create_quality_mask(
+            self.lc.quality,
+            self.tpf.quality & lk.utils.TessQualityFlags.DEFAULT_BITMASK,
+        )
         # Spline DM
         knots = np.linspace(
             self.lc.time[0].value,
@@ -74,9 +98,11 @@ class TESSCutCorrector(lk.RegressionCorrector):
         dm_spline = lk.designmatrix.create_sparse_spline_matrix(
             self.lc.time.value, knots=knots, degree=spline_degree
         )
-        dm_spline.prior_mu = np.ones(dm_spline.shape[1]) * self.lc.flux.value.mean()
+        dm_spline.prior_mu = (
+            np.ones(dm_spline.shape[1]) * self.lc.flux[~bad].value.mean()
+        )
         dm_spline.prior_sigma = (
-            np.ones(dm_spline.shape[1]) * self.lc.flux.value.std() * 3
+            np.ones(dm_spline.shape[1]) * self.lc.flux.value[~bad].std() * 0.3
         )
 
         # Scattered Light DM
@@ -90,7 +116,10 @@ class TESSCutCorrector(lk.RegressionCorrector):
             ).T,
             name="sky",
             prior_mu=[0, 0],
-            prior_sigma=[0.01, 0.01 ** 2],
+            prior_sigma=[
+                self.lc.flux.value[~bad].std(),
+                self.lc.flux.value[~bad].std() ** 0.5,
+            ],
         )
 
         # Jitter DM
@@ -105,10 +134,6 @@ class TESSCutCorrector(lk.RegressionCorrector):
             [dm_bkg.to_sparse(), dm_jitter.to_sparse(), dm_spline]
         )
 
-        bad = ~lk.utils.TessQualityFlags.create_quality_mask(
-            self.lc.quality,
-            self.tpf.quality & lk.utils.TessQualityFlags.DEFAULT_BITMASK,
-        )
         if cadence_mask is None:
             cadence_mask = np.ones(len(self.lc.time), bool)
         super().correct(
