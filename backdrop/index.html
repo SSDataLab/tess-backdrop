@@ -225,6 +225,21 @@
 
   
   
+  
+    <li class="md-nav__item">
+      <a href="../lightcurve-example/" class="md-nav__link">
+        Example: Using tess-backdrop to create corrected TESS FFI light curves
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
     
   
   
@@ -267,13 +282,6 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#tess_backdrop.backdrop.BackDrop.__init__" class="md-nav__link">
-    __init__()
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
   <a href="#tess_backdrop.backdrop.BackDrop.build_correction" class="md-nav__link">
     build_correction()
   </a>
@@ -309,6 +317,21 @@
   
 
     
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../corrector/" class="md-nav__link">
+        Corrector API Docs
+      </a>
+    </li>
+  
+
+    
   </ul>
 </nav>
                   </div>
@@ -337,13 +360,6 @@
         <li class="md-nav__item">
   <a href="#tess_backdrop.backdrop.BackDrop" class="md-nav__link">
     tess_backdrop.backdrop.BackDrop
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#tess_backdrop.backdrop.BackDrop.__init__" class="md-nav__link">
-    __init__()
   </a>
   
 </li>
@@ -407,35 +423,6 @@
 2. A 2D b-spline to remove high spatial frequency noise
 3. A model for strap offsets.</p>
 
-
-
-
-  <div class="doc doc-children">
-
-
-
-
-
-
-
-
-
-  <div class="doc doc-object doc-method">
-
-
-
-<h2 id="tess_backdrop.backdrop.BackDrop.__init__" class="doc doc-heading">
-<code class="highlight language-python"><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">fnames</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">npoly</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span> <span class="n">nknots</span><span class="o">=</span><span class="mi">40</span><span class="p">,</span> <span class="n">degree</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">nb</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">reference_frame</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span></code>
-
-  <span class="doc doc-properties">
-      <small class="doc doc-property doc-property-special"><code>special</code></small>
-  </span>
-
-</h2>
-
-    <div class="doc doc-contents ">
-
-
 <p><strong>Parameters:</strong></p>
 <table>
   <thead>
@@ -451,44 +438,45 @@
         <td><code>fnames</code></td>
         <td><code>list of str, or list of astropy.io.fits objects</code></td>
         <td><p>Input TESS FFIs</p></td>
-        <td><code>None</code></td>
+        <td><em>required</em></td>
       </tr>
       <tr>
         <td><code>npoly</code></td>
         <td><code>int</code></td>
         <td><p>The order of polynomial to fit to the data in both x and y dimension.
 Recommend ~4.</p></td>
-        <td><code>4</code></td>
+        <td><em>required</em></td>
       </tr>
       <tr>
         <td><code>nknots</code></td>
         <td><code>int</code></td>
         <td><p>Number of knots to fit in each dimension. Recommend ~40.</p></td>
-        <td><code>40</code></td>
+        <td><em>required</em></td>
       </tr>
       <tr>
         <td><code>degree</code></td>
         <td><code>int</code></td>
         <td><p>Degree of spline to fit.</p></td>
-        <td><code>3</code></td>
+        <td><em>required</em></td>
       </tr>
       <tr>
         <td><code>nb</code></td>
         <td><code>int</code></td>
         <td><p>Number of bins to downsample to for polynomial fit.</p></td>
-        <td><code>8</code></td>
-      </tr>
-      <tr>
-        <td><code>reference_frame</code></td>
-        <td><code>int</code></td>
-        <td><p>The index of the frame we'll use as the "reference" frame for the jitter model.</p></td>
-        <td><code>0</code></td>
+        <td><em>required</em></td>
       </tr>
   </tbody>
 </table>
-    </div>
 
-  </div>
+
+
+  <div class="doc doc-children">
+
+
+
+
+
+
 
 
 
@@ -648,12 +636,12 @@ estimate for the input column, row and times.</p></td>
 
       <p>Save a model fit to the tess-backrop data directory.</p>
 <p>Will create a fits file containing the following extensions
-    1. Primary
-    2. T_START: The time array for each background solution
-    3. KNOTS: Knot spacing in row and column
-    4. SPLINE_W: Solution to the spline model. Has shape (ntimes x nknots x nknots)
-    5. STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
-    6. POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)</p>
+    - Primary
+    - T_START: The time array for each background solution
+    - KNOTS: Knot spacing in row and column
+    - SPLINE_W: Solution to the spline model. Has shape (ntimes x nknots x nknots)
+    - STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
+    - POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)</p>
 
     </div>
 
@@ -686,7 +674,7 @@ estimate for the input column, row and times.</p></td>
   
     <nav class="md-footer__inner md-grid" aria-label="Footer">
       
-        <a href="../demo/" class="md-footer__link md-footer__link--prev" rel="prev">
+        <a href="../lightcurve-example/" class="md-footer__link md-footer__link--prev" rel="prev">
           <div class="md-footer__button md-icon">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
           </div>
@@ -695,11 +683,25 @@ estimate for the input column, row and times.</p></td>
               <span class="md-footer__direction">
                 Previous
               </span>
-              Example: Using tess_backdrop to correct a TESS cut TPF
+              Example: Using tess-backdrop to create corrected TESS FFI light curves
             </div>
           </div>
         </a>
       
+      
+        <a href="../corrector/" class="md-footer__link md-footer__link--next" rel="next">
+          <div class="md-footer__title">
+            <div class="md-ellipsis">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              Corrector API Docs
+            </div>
+          </div>
+          <div class="md-footer__button md-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11H4z"/></svg>
+          </div>
+        </a>
       
     </nav>
   
