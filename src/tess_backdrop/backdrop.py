@@ -77,17 +77,30 @@ class BackDrop(object):
 
     def _build_mask(self):
         """Builds a boolean mask for the input image stack which
-        1. Masks out very bright pixels (>3000 counts) or pixels with a sharp gradient (>300 counts)
+
+        1. Masks out very bright pixels (>1500 counts) or pixels with a sharp gradient (>30 counts)
         2. Masks out pixels where there is a consistently outlying gradient in the image
         3. Masks out saturated columns, including a wide halo, and a whisker mask.
-        """
-        hard_mask = np.zeros((2048, 2048), dtype=bool)
-        soft_mask = np.zeros((2048, 2048), dtype=int)
 
-        # NOTE COLUMN NEEDS +45 EVENTUALLY
-        #        data = fitsio.read(self.fnames[0])[:2048, 45 : 2048 + 45]
+        Returns
+        -------
+        soft_mask : np.ndarray of bools
+            "soft" mask of pixels that, on average, have steep gradients
+        hard_mask : np.ndarray of bools
+            "hard" mask of pixels that, in any frame, have a gradient of over 60 counts
+        sat_mask : np.ndarray of bools
+            Mask where pixels that are not saturated are True
+        diff_ar : np.ndarray of bools
+            Array with the fraction of pixels in a given frame that are 200 counts
+            different from the previous frame.
+        """
+        average = np.zeros((2048, 2048))
+        weights = np.zeros((2048, 2048))
+        diff = None
+        diff_ar = np.zeros(len(self.fnames))
         sat_mask = None
-        for fname in tqdm(self.fnames, desc="Building Pixel Mask"):
+        hard_mask = np.zeros((2048, 2048), dtype=bool)
+        for fdx, fname in enumerate(tqdm(self.fnames, desc="Building Pixel Mask")):
             with fits.open(fname, lazy_load_hdus=True) as hdu:
                 if fname == self.fnames[0]:
                     self.sector = int(fname.split("-s")[1].split("-")[0])
@@ -103,54 +116,49 @@ class BackDrop(object):
                     raise ValueError("All files must have same sector, camera, ccd.")
 
             data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
-            # Blown out frames don't count towards mask
-            if (data > 1500).sum() / (2048 ** 2) > 0.1:
+            k = (data > 0) & (data < 1500)
+            # Blown out frames do not count.
+            if (~k).sum() / (2048 ** 2) > 0.1:
                 continue
-            if (data < -10).sum() / (2048 ** 2) > 0.1:
-                continue
-
-            # If there's a significant portion of the data that would be removed by the hard mask,
-            # Skip this frame.
-            grad = np.gradient(data)
-            hm = (np.hypot(*grad) > 300) | (data > 3000)
-            if (hm.sum() / (2048 ** 2)) > 0.1:
-                continue
-
+            if diff is None:
+                diff = data.copy()
+            else:
+                diff -= data
+                diff_ar[fdx] = (np.abs(diff) > 200).sum() / (2048 ** 2)
+                if (np.abs(diff) > 200).sum() / (2048 ** 2) > 0.002:
+                    diff = data.copy()
+                    continue
+                diff = data.copy()
             if sat_mask is None:
                 sat_mask = get_saturation_mask(data)
+            grad = np.gradient(data)
+            hard_mask |= np.hypot(*grad) > 60
 
-            # This mask highlights pixels where there is a sharp flux gradient.
-            hard_mask |= hm
-            sigma = _std_iter(grad[0], mask=hard_mask, sigma=2.5, n_iters=3)
-            soft_mask2 = grad[0] > (sigma * 2.5)
-            sigma = _std_iter(grad[1], mask=hard_mask, sigma=2.5, n_iters=3)
-            soft_mask2 |= grad[1] > (sigma * 2.5)
-            soft_mask[soft_mask2] += 1
+            average[k] += data[k] - np.mean(data[k])
+            weights[k] += 1
+        average /= weights
+        soft_mask = (np.hypot(*np.gradient(average)) > 30) | (weights == 0)
+        soft_mask |= np.any(np.gradient(soft_mask.astype(float)), axis=0) != 0
 
-            # import pdb
-            #
-            # pdb.set_trace()
-        hard_mask |= np.asarray(np.gradient(hard_mask.astype(float))).any(axis=0)
-        self.star_mask = ~(hard_mask | ~sat_mask | (soft_mask / len(self.fnames) > 0.3))
+        self.star_mask = ~(hard_mask | soft_mask | ~sat_mask)
         self.sat_mask = sat_mask
 
         # We don't need all these pixels, it's too many to store for every frame.
         # Instead we'll just save 5000 of them.
-        self.jitter_mask = soft_mask / len(self.fnames) > 0.3
-        try:
-            s = np.random.choice((~self.star_mask).sum(), size=5000, replace=False)
-            l = np.asarray(np.where(~self.star_mask))
-            l = l[:, s]
-            self.jitter_mask = np.zeros((2048, 2048), bool)
-            self.jitter_mask[l[0], l[1]] = True
-        except ValueError:
-            pass
+        s = np.random.choice((soft_mask & sat_mask).sum(), size=5000, replace=False)
+        l = np.asarray(np.where(soft_mask & sat_mask))
+        l = l[:, s]
+        self.jitter_mask = np.zeros((2048, 2048), bool)
+        self.jitter_mask[l[0], l[1]] = True
 
         #        with fits.open(self.fnames[self.reference_frame]) as hdu:
+        fname = self.fnames[len(self.fnames) // 2]
         data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
         grad = np.asarray(np.gradient(data))
         self.median_data = data[self.jitter_mask]
         self.median_gradient = grad[:, self.jitter_mask]
+
+        return soft_mask, hard_mask, sat_mask, diff_ar
 
     def _build_matrices(self):
         """Allocate the matrices to fit the background.
@@ -244,7 +252,7 @@ class BackDrop(object):
     def fit_model(self):
         """Fit the tess-backdrop model to the files specified by `fnames`."""
         if not hasattr(self, "star_mask"):
-            self._build_mask()
+            _ = self._build_mask()
         if not hasattr(self, "_poly_X"):
             self._build_matrices()
 
@@ -562,11 +570,6 @@ class BackDrop(object):
             if (np.min(np.abs((self.t_start - t) + exptime)) < exptime)
         ]
 
-        tdxs = [
-            np.argmin(np.abs((tpf.time.value - t) + exptime))
-            for t in self.t_start
-            if (np.min(np.abs((tpf.time.value - t) + exptime)) < exptime)
-        ]
         bkg = self.build_correction(
             np.arange(tpf.shape[2]) + tpf.column,
             np.arange(tpf.shape[1]) + tpf.row,
@@ -650,7 +653,7 @@ def _find_saturation_column_centers(mask):
     return centers, radii
 
 
-def get_saturation_mask(data):
+def get_saturation_mask(data, whisker_width=40):
     """
     Finds a mask that will remove saturated pixels, and any "whiskers".
 
@@ -669,7 +672,7 @@ def get_saturation_mask(data):
     centers, radii = _find_saturation_column_centers(sat_cols)
     whisker_mask = np.zeros((2048, 2048), bool)
     for idx in np.arange(-2, 2):
-        for jdx in np.arange(-50, 50):
+        for jdx in np.arange(-whisker_width // 2, whisker_width // 2):
 
             a1 = np.max([np.zeros(len(centers)), centers[:, 1] - idx], axis=0)
             a1 = np.min([np.ones(len(centers)) * 2047, a1], axis=0)
