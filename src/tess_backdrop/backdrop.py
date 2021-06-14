@@ -272,16 +272,17 @@ class BackDrop(object):
                 self.strap_w[idx, :],
                 self.jitter_pix[idx, :],
             ) = self._fit_frame(fname)
-        # Smaller version of jitter for use later
 
-        bad = sigma_clip(np.gradient(self.jitter_pix, axis=1).std(axis=1), sigma=5).mask
-        _, med, std = sigma_clipped_stats(self.jitter_pix[~bad], axis=0)
-        j = (np.copy(self.jitter_pix) - med) / std
-        j[j > 10] = 0
-        U, s, V = pca(j[~bad], 20, n_iter=100)
-        X = np.zeros((self.jitter_pix.shape[0], U.shape[1]))
-        X[~bad] = np.copy(U)
-        self.jitter = X
+        # # Smaller version of jitter for use later
+        # bad = sigma_clip(np.gradient(self.jitter_pix, axis=1).std(axis=1), sigma=5).mask
+        # _, med, std = sigma_clipped_stats(self.jitter_pix[~bad], axis=0)
+        # j = (np.copy(self.jitter_pix) - med) / std
+        # j[j > 10] = 0
+        # U, s, V = pca(j[~bad], 20, n_iter=100)
+        # X = np.zeros((self.jitter_pix.shape[0], U.shape[1]))
+        # X[~bad] = np.copy(U)
+        # self.jitter = X
+        self.jitter = np.copy(self.jitter_pix)
 
     def _fit_frame(self, fname):
         """Helper function to fit a model to an individual frame."""
