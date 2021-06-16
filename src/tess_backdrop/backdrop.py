@@ -13,6 +13,10 @@ from tqdm import tqdm
 from . import PACKAGEDIR
 from .version import __version__
 
+import logging
+
+log = logging.getLogger(__name__)
+
 
 class BackDrop(object):
     """
@@ -100,12 +104,15 @@ class BackDrop(object):
         diff_ar = np.zeros(len(self.fnames))
         sat_mask = None
         hard_mask = np.zeros((2048, 2048), dtype=bool)
-        for fdx, fname in enumerate(tqdm(self.fnames, desc="Building Pixel Mask")):
+        for fdx, fname in enumerate(self.fnames):
             with fits.open(fname, lazy_load_hdus=True) as hdu:
                 if fname == self.fnames[0]:
                     self.sector = int(fname.split("-s")[1].split("-")[0])
                     self.camera = hdu[1].header["camera"]
                     self.ccd = hdu[1].header["ccd"]
+                    log.info(
+                        f"Building mask s{self.sector} c{self.camera} ccd{self.ccd}"
+                    )
                 if not np.all(
                     [
                         self.sector == int(fname.split("-s")[1].split("-")[0]),
@@ -164,6 +171,8 @@ class BackDrop(object):
         """Allocate the matrices to fit the background.
         When we want to build the matrices to evaluate this background model,
         we will be able do so in a slightly more efficient way."""
+        log.info(f"Building matrices s{self.sector} c{self.camera} ccd{self.ccd}")
+
         row, column = np.mgrid[:2048, :2048]
         c, r = column / 2048 - 0.5, row / 2048 - 0.5
 
@@ -263,8 +272,13 @@ class BackDrop(object):
             np.zeros(len(self.fnames)),
             np.zeros((len(self.fnames), self.jitter_mask.sum())),
         )
-
-        for idx, fname in enumerate(tqdm(self.fnames, desc="Fitting FFI Frames")):
+        log.info(f"Building frames s{self.sector} c{self.camera} ccd{self.ccd}")
+        points = np.linspace(0, len(self.fnames), 7, dtype=int)
+        for idx, fname in enumerate(self.fnames, desc="Fitting FFI Frames"):
+            if idx in points:
+                log.info(
+                    f"Running frames s{self.sector} c{self.camera} ccd{self.ccd} {np.where(points == idx)[0][0] * 20}%"
+                )
             (
                 self.t_start[idx],
                 self.poly_w[idx, :],
@@ -360,6 +374,7 @@ class BackDrop(object):
             - STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
             - POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
+        log.info(f"Building saving s{self.sector} c{self.camera} ccd{self.ccd}")
         if not hasattr(self, "star_mask"):
             raise ValueError(
                 "It does not look like you have regenerated a tess_backdrop model, I do not think you want to save."
