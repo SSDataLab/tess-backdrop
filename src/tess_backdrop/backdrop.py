@@ -1,19 +1,15 @@
+import logging
 import os
 
 import fitsio
 import numpy as np
 import pandas as pd
 from astropy.io import fits
-from astropy.stats import sigma_clip, sigma_clipped_stats
-from fbpca import pca
 from lightkurve.correctors.designmatrix import _spline_basis_vector
 from scipy.sparse import csr_matrix, hstack, lil_matrix, vstack
-from tqdm import tqdm
 
 from . import PACKAGEDIR
 from .version import __version__
-
-import logging
 
 log = logging.getLogger(__name__)
 
