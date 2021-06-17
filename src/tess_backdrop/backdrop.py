@@ -36,6 +36,8 @@ class BackDrop(object):
         Degree of spline to fit.
     nb: int
         Number of bins to downsample to for polynomial fit.
+    cutout_size : int
+        Size of cut out to use. Default is 2048, full FFI
     """
 
     def __init__(
@@ -45,6 +47,7 @@ class BackDrop(object):
         nknots=40,
         degree=3,
         nb=8,
+        cutout_size=2048,
         #        reference_frame=0,
     ):
 
@@ -70,10 +73,13 @@ class BackDrop(object):
         self.fnames = fnames
         self.nknots = nknots
         self.nb = nb
+        self.cutout_size = cutout_size
         #        self.reference_frame = reference_frame
         #        if self.fnames is not None:
         #            self.reference_image = self.fnames[self.reference_frame]
-        self.knots_wbounds = _get_knots(np.arange(2048), nknots=nknots, degree=degree)
+        self.knots_wbounds = _get_knots(
+            np.arange(self.cutout_size), nknots=nknots, degree=degree
+        )
 
     def _build_mask(self):
         """Builds a boolean mask for the input image stack which
@@ -94,12 +100,12 @@ class BackDrop(object):
             Array with the fraction of pixels in a given frame that are 200 counts
             different from the previous frame.
         """
-        average = np.zeros((2048, 2048))
-        weights = np.zeros((2048, 2048))
+        average = np.zeros((self.cutout_size, self.cutout_size))
+        weights = np.zeros((self.cutout_size, self.cutout_size))
         diff = None
         diff_ar = np.zeros(len(self.fnames))
         sat_mask = None
-        hard_mask = np.zeros((2048, 2048), dtype=bool)
+        hard_mask = np.zeros((self.cutout_size, self.cutout_size), dtype=bool)
         for fdx, fname in enumerate(self.fnames):
             with fits.open(fname, lazy_load_hdus=True) as hdu:
                 if fname == self.fnames[0]:
@@ -118,45 +124,58 @@ class BackDrop(object):
                 ):
                     raise ValueError("All files must have same sector, camera, ccd.")
 
-            data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
+            data = fitsio.read(fname)[: self.cutout_size, 45 : self.cutout_size + 45]
             k = (data > 0) & (data < 1500)
             # Blown out frames do not count.
-            if (~k).sum() / (2048 ** 2) > 0.1:
+            if (~k).sum() / (self.cutout_size ** 2) > 0.1:
                 continue
             if diff is None:
                 diff = data.copy()
             else:
                 diff -= data
-                diff_ar[fdx] = (np.abs(diff) > 200).sum() / (2048 ** 2)
-                if (np.abs(diff) > 200).sum() / (2048 ** 2) > 0.002:
+                diff_ar[fdx] = (np.abs(diff) > 200).sum() / (self.cutout_size ** 2)
+                if (np.abs(diff) > 200).sum() / (self.cutout_size ** 2) > 0.002:
                     diff = data.copy()
                     continue
                 diff = data.copy()
+            data -= np.mean(data[k])
             if sat_mask is None:
-                sat_mask = get_saturation_mask(data)
+                sat_mask = get_saturation_mask(data, cutout_size=self.cutout_size)
+            hard_mask |= data > 1000
             grad = np.gradient(data)
             hard_mask |= np.hypot(*grad) > 60
 
-            average[k] += data[k] - np.mean(data[k])
+            average[k] += data[k]
             weights[k] += 1
         average /= weights
-        soft_mask = (np.hypot(*np.gradient(average)) > 30) | (weights == 0)
-        soft_mask |= np.any(np.gradient(soft_mask.astype(float)), axis=0) != 0
+        # soft_mask = (np.hypot(*np.gradient(average)) > 10) | (weights == 0)
+        soft_mask = (average > 10) | (weights == 0)
+        soft_mask |= np.hypot(*np.gradient(average)) > 10
+        #        soft_mask |= np.any(np.gradient(soft_mask.astype(float)), axis=0) != 0
+
+        m = soft_mask[1:-1, 1:-1].copy()
+        m |= soft_mask[:-2, 1:-1]
+        m |= soft_mask[2:, 1:-1]
+        m |= soft_mask[1:-1, :-2]
+        m |= soft_mask[1:-1, 2:]
+        soft_mask[1:-1, 1:-1] = m
 
         self.star_mask = ~(hard_mask | soft_mask | ~sat_mask)
         self.sat_mask = sat_mask
 
         # We don't need all these pixels, it's too many to store for every frame.
         # Instead we'll just save 5000 of them.
-        s = np.random.choice((soft_mask & sat_mask).sum(), size=5000, replace=False)
-        l = np.asarray(np.where(soft_mask & sat_mask))
-        l = l[:, s]
-        self.jitter_mask = np.zeros((2048, 2048), bool)
-        self.jitter_mask[l[0], l[1]] = True
-
+        if (soft_mask & sat_mask).sum() > 5000:
+            s = np.random.choice((soft_mask & sat_mask).sum(), size=5000, replace=False)
+            l = np.asarray(np.where(soft_mask & sat_mask))
+            l = l[:, s]
+            self.jitter_mask = np.zeros((self.cutout_size, self.cutout_size), bool)
+            self.jitter_mask[l[0], l[1]] = True
+        else:
+            self.jitter_mask = np.copy((soft_mask & sat_mask))
         #        with fits.open(self.fnames[self.reference_frame]) as hdu:
         fname = self.fnames[len(self.fnames) // 2]
-        data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
+        data = fitsio.read(fname)[: self.cutout_size, 45 : self.cutout_size + 45]
         grad = np.asarray(np.gradient(data))
         self.median_data = data[self.jitter_mask]
         self.median_gradient = grad[:, self.jitter_mask]
@@ -169,8 +188,8 @@ class BackDrop(object):
         we will be able do so in a slightly more efficient way."""
         log.info(f"Building matrices s{self.sector} c{self.camera} ccd{self.ccd}")
 
-        row, column = np.mgrid[:2048, :2048]
-        c, r = column / 2048 - 0.5, row / 2048 - 0.5
+        row, column = np.mgrid[: self.cutout_size, : self.cutout_size]
+        c, r = column / self.cutout_size - 0.5, row / self.cutout_size - 0.5
 
         self._poly_X = np.asarray(
             [
@@ -180,9 +199,12 @@ class BackDrop(object):
             ]
         ).T
 
-        row, column = np.mgrid[: 2048 // self.nb, : 2048 // self.nb] * self.nb
+        row, column = (
+            np.mgrid[: self.cutout_size // self.nb, : self.cutout_size // self.nb]
+            * self.nb
+        )
         row, column = row + self.nb / 2, column + self.nb / 2
-        c, r = column / 2048 - 0.5, row / 2048 - 0.5
+        c, r = column / self.cutout_size - 0.5, row / self.cutout_size - 0.5
 
         self.weights = np.sum(
             [
@@ -204,11 +226,11 @@ class BackDrop(object):
             self._poly_X_down[self.weights.ravel() != 0]
         )
 
-        e = lil_matrix((2048, 2048 * 2048))
-        for idx in range(2048):
-            e[idx, np.arange(2048) * 2048 + idx] = 1
+        e = lil_matrix((self.cutout_size, self.cutout_size * self.cutout_size))
+        for idx in range(self.cutout_size):
+            e[idx, np.arange(self.cutout_size) * self.cutout_size + idx] = 1
         self._strap_X = e.T.tocsr()
-        self._spline_X = self._get_spline_matrix(np.arange(2048))
+        self._spline_X = self._get_spline_matrix(np.arange(self.cutout_size))
         self.X = hstack([self._spline_X, self._strap_X], format="csr")
 
         # We'll sacrifice some memory here for speed later.
@@ -264,13 +286,13 @@ class BackDrop(object):
         self.poly_w, self.spline_w, self.strap_w, self.t_start, self.jitter_pix = (
             np.zeros((len(self.fnames), self.npoly, self.npoly)),
             np.zeros((len(self.fnames), self.nknots, self.nknots)),
-            np.zeros((len(self.fnames), 2048)),
+            np.zeros((len(self.fnames), self.cutout_size)),
             np.zeros(len(self.fnames)),
             np.zeros((len(self.fnames), self.jitter_mask.sum())),
         )
         log.info(f"Building frames s{self.sector} c{self.camera} ccd{self.ccd}")
         points = np.linspace(0, len(self.fnames), 7, dtype=int)
-        for idx, fname in enumerate(self.fnames, desc="Fitting FFI Frames"):
+        for idx, fname in enumerate(self.fnames):
             if idx in points:
                 log.info(
                     f"Running frames s{self.sector} c{self.camera} ccd{self.ccd} {np.where(points == idx)[0][0] * 20}%"
@@ -309,8 +331,8 @@ class BackDrop(object):
                 )
 
         # NOTE COLUMN NEEDS +45 EVENTUALLY
-        data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
-        # data = hdu[1].data[:2048, 45 : 2048 + 45]
+        data = fitsio.read(fname)[: self.cutout_size, 45 : self.cutout_size + 45]
+        # data = hdu[1].data[:self.cutout_size, 45 : self.cutout_size + 45]
         t_start = hdu[0].header["TSTART"]
 
         avg = np.sum(
@@ -328,7 +350,9 @@ class BackDrop(object):
             avg.ravel()[self.weights.ravel() != 0]
         )
         poly_w = np.linalg.solve(self.poly_sigma_w_inv, B)
-        res = data - self._poly_X.dot(poly_w).reshape((2048, 2048))
+        res = data - self._poly_X.dot(poly_w).reshape(
+            (self.cutout_size, self.cutout_size)
+        )
 
         # The spline and strap components should be small
         # sigma_w_inv = self.XT[:, star_mask.ravel()].dot(
@@ -367,7 +391,7 @@ class BackDrop(object):
             - T_START: The time array for each background solution
             - KNOTS: Knot spacing in row and column
             - SPLINE_W: Solution to the spline model. Has shape (ntimes x nknots x nknots)
-            - STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
+            - STRAP_W: Solution to the strap model. Has shape (ntimes x self.cutout_size)
             - POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
         log.info(f"Building saving s{self.sector} c{self.camera} ccd{self.ccd}")
@@ -519,7 +543,7 @@ class BackDrop(object):
                 )
 
         c, r = np.meshgrid(column, row)
-        c, r = c / 2048 - 0.5, r / 2048 - 0.5
+        c, r = c / self.cutout_size - 0.5, r / self.cutout_size - 0.5
 
         self._poly_X = np.asarray(
             [
@@ -665,7 +689,7 @@ def _find_saturation_column_centers(mask):
     return centers, radii
 
 
-def get_saturation_mask(data, whisker_width=40):
+def get_saturation_mask(data, whisker_width=40, cutout_size=2048):
     """
     Finds a mask that will remove saturated pixels, and any "whiskers".
 
@@ -682,15 +706,15 @@ def get_saturation_mask(data, whisker_width=40):
     sat_cols = (np.abs(np.gradient(data)[1]) > 1e4) | (data > 1e5)
 
     centers, radii = _find_saturation_column_centers(sat_cols)
-    whisker_mask = np.zeros((2048, 2048), bool)
+    whisker_mask = np.zeros((cutout_size, cutout_size), bool)
     for idx in np.arange(-2, 2):
         for jdx in np.arange(-whisker_width // 2, whisker_width // 2):
 
             a1 = np.max([np.zeros(len(centers)), centers[:, 1] - idx], axis=0)
-            a1 = np.min([np.ones(len(centers)) * 2047, a1], axis=0)
+            a1 = np.min([np.ones(len(centers)) * cutout_size - 1, a1], axis=0)
 
             b1 = np.max([np.zeros(len(centers)), centers[:, 0] - jdx], axis=0)
-            b1 = np.min([np.ones(len(centers)) * 2047, b1], axis=0)
+            b1 = np.min([np.ones(len(centers)) * cutout_size - 1, b1], axis=0)
 
             whisker_mask[a1.astype(int), b1.astype(int)] = True
 
@@ -700,7 +724,7 @@ def get_saturation_mask(data, whisker_width=40):
         sat_mask |= np.gradient(sat_mask.astype(float), axis=1) != 0
     sat_mask |= whisker_mask
 
-    X, Y = np.mgrid[:2048, :2048]
+    X, Y = np.mgrid[:cutout_size, :cutout_size]
 
     jdx = 0
     kdx = 0
