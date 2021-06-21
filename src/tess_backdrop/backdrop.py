@@ -77,6 +77,16 @@ class BackDrop(object):
         #        self.reference_frame = reference_frame
         #        if self.fnames is not None:
         #            self.reference_image = self.fnames[self.reference_frame]
+        if self.fnames is not None:
+            if len(self.fnames) >= 15:
+                log.info("Finding bad frames")
+                self.bad_frames = _find_bad_frames(
+                    self.fnames, cutout_size=self.cutout_size
+                )
+            else:
+                self.bad_frames = np.zeros(len(self.fnames), bool)
+        else:
+            self.bad_frames = None
         self.knots_wbounds = _get_knots(
             np.arange(self.cutout_size), nknots=nknots, degree=degree
         )
@@ -123,11 +133,13 @@ class BackDrop(object):
                     ]
                 ):
                     raise ValueError("All files must have same sector, camera, ccd.")
-
+            # Bad frames do not count.
+            if self.bad_frames[fdx]:
+                continue
             data = fitsio.read(fname)[: self.cutout_size, 45 : self.cutout_size + 45]
             k = (data > 0) & (data < 1500)
             # Blown out frames do not count.
-            if (~k).sum() / (self.cutout_size ** 2) > 0.1:
+            if (~k).sum() / (self.cutout_size ** 2) > 0.05:
                 continue
             if diff is None:
                 diff = data.copy()
@@ -141,24 +153,30 @@ class BackDrop(object):
             data -= np.mean(data[k])
             if sat_mask is None:
                 sat_mask = get_saturation_mask(data, cutout_size=self.cutout_size)
-            hard_mask |= data > 1000
             grad = np.gradient(data)
             hard_mask |= np.hypot(*grad) > 60
+            hard_mask |= data > 10000
 
+            k &= data < 300
             average[k] += data[k]
             weights[k] += 1
-        average /= weights
+
+        # I don't care about dividing by zero here
+        with np.errstate(divide="ignore", invalid="ignore"):
+            average /= weights
+
         # soft_mask = (np.hypot(*np.gradient(average)) > 10) | (weights == 0)
-        soft_mask = (average > 10) | (weights == 0)
-        soft_mask |= np.hypot(*np.gradient(average)) > 10
+        # soft_mask = (average > 20) | (weights == 0)
+        soft_mask = (np.hypot(*np.gradient(average)) > 10) | (weights == 0)
         #        soft_mask |= np.any(np.gradient(soft_mask.astype(float)), axis=0) != 0
 
-        m = soft_mask[1:-1, 1:-1].copy()
-        m |= soft_mask[:-2, 1:-1]
-        m |= soft_mask[2:, 1:-1]
-        m |= soft_mask[1:-1, :-2]
-        m |= soft_mask[1:-1, 2:]
-        soft_mask[1:-1, 1:-1] = m
+        m = np.zeros((self.cutout_size, self.cutout_size))
+        m[1:-1, 1:-1] += soft_mask[:-2, 1:-1].astype(int)
+        m[1:-1, 1:-1] += soft_mask[2:, 1:-1].astype(int)
+        m[1:-1, 1:-1] += soft_mask[1:-1, :-2].astype(int)
+        m[1:-1, 1:-1] += soft_mask[1:-1, 2:].astype(int)
+
+        soft_mask |= m >= 3
 
         self.star_mask = ~(hard_mask | soft_mask | ~sat_mask)
         self.sat_mask = sat_mask
@@ -179,6 +197,8 @@ class BackDrop(object):
         grad = np.asarray(np.gradient(data))
         self.median_data = data[self.jitter_mask]
         self.median_gradient = grad[:, self.jitter_mask]
+        self.average_image = np.nan_to_num(average - np.nanmedian(average))
+        self.average_image[~np.isfinite(self.average_image)] = 0
 
         return soft_mask, hard_mask, sat_mask, diff_ar
 
@@ -190,14 +210,43 @@ class BackDrop(object):
 
         row, column = np.mgrid[: self.cutout_size, : self.cutout_size]
         c, r = column / self.cutout_size - 0.5, row / self.cutout_size - 0.5
-
+        crav = c.ravel()
+        rrav = r.ravel()
+        del (
+            row,
+            column,
+            c,
+            r,
+        )
         self._poly_X = np.asarray(
             [
-                c.ravel() ** idx * r.ravel() ** jdx
+                crav ** idx * rrav ** jdx
                 for idx in np.arange(self.npoly)
                 for jdx in np.arange(self.npoly)
             ]
         ).T
+
+        # Cut the polynomial fit into 4 columnwise sections
+        points = np.arange(0, 2048 + 512, 512)
+
+        def expand_poly(x, crav, points):
+            return np.hstack(
+                [
+                    x
+                    * (
+                        (((crav + 0.5) * self.cutout_size) >= p1)
+                        & (((crav + 0.5) * self.cutout_size) < p2)
+                    )[:, None]
+                    for p1, p2 in zip(points[:-1], points[1:])
+                    if (
+                        (((crav + 0.5) * self.cutout_size) >= p1)
+                        & (((crav + 0.5) * self.cutout_size) < p2)
+                    ).any()
+                ]
+            )
+
+        self._poly_X = expand_poly(self._poly_X, crav, points)
+        del crav, rrav
 
         row, column = (
             np.mgrid[: self.cutout_size // self.nb, : self.cutout_size // self.nb]
@@ -205,7 +254,14 @@ class BackDrop(object):
         )
         row, column = row + self.nb / 2, column + self.nb / 2
         c, r = column / self.cutout_size - 0.5, row / self.cutout_size - 0.5
-
+        crav = c.ravel()
+        rrav = r.ravel()
+        del (
+            row,
+            column,
+            c,
+            r,
+        )
         self.weights = np.sum(
             [
                 self.star_mask[idx :: self.nb, jdx :: self.nb]
@@ -217,11 +273,14 @@ class BackDrop(object):
 
         self._poly_X_down = np.asarray(
             [
-                c.ravel() ** idx * r.ravel() ** jdx
+                crav ** idx * rrav ** jdx
                 for idx in np.arange(self.npoly)
                 for jdx in np.arange(self.npoly)
             ]
         ).T
+        self._poly_X_down = expand_poly(self._poly_X_down, crav, points)
+        del crav, rrav
+
         self.poly_sigma_w_inv = self._poly_X_down[self.weights.ravel() != 0].T.dot(
             self._poly_X_down[self.weights.ravel() != 0]
         )
@@ -230,6 +289,7 @@ class BackDrop(object):
         for idx in range(self.cutout_size):
             e[idx, np.arange(self.cutout_size) * self.cutout_size + idx] = 1
         self._strap_X = e.T.tocsr()
+        del e
         self._spline_X = self._get_spline_matrix(np.arange(self.cutout_size))
         self.X = hstack([self._spline_X, self._strap_X], format="csr")
 
@@ -239,7 +299,7 @@ class BackDrop(object):
         self.XmT = self.X[self.star_mask.ravel()].T.tocsr()
         self.prior_mu = np.zeros(self._spline_X.shape[1] + self._strap_X.shape[1])
         self.prior_sigma = (
-            np.ones(self._spline_X.shape[1] + self._strap_X.shape[1]) * 40
+            np.ones(self._spline_X.shape[1] + self._strap_X.shape[1]) * 400
         )
         self.sigma_w_inv = self.XmT.dot(self.Xm) + np.diag(1 / self.prior_sigma ** 2)
 
@@ -284,7 +344,14 @@ class BackDrop(object):
             self._build_matrices()
 
         self.poly_w, self.spline_w, self.strap_w, self.t_start, self.jitter_pix = (
-            np.zeros((len(self.fnames), self.npoly, self.npoly)),
+            np.zeros(
+                (
+                    len(self.fnames),
+                    self.npoly
+                    * self.npoly
+                    * (np.arange(0, 2048 + 512, 512) < self.cutout_size).sum(),
+                )
+            ),
             np.zeros((len(self.fnames), self.nknots, self.nknots)),
             np.zeros((len(self.fnames), self.cutout_size)),
             np.zeros(len(self.fnames)),
@@ -331,7 +398,10 @@ class BackDrop(object):
                 )
 
         # NOTE COLUMN NEEDS +45 EVENTUALLY
-        data = fitsio.read(fname)[: self.cutout_size, 45 : self.cutout_size + 45]
+        data = (
+            fitsio.read(fname)[: self.cutout_size, 45 : self.cutout_size + 45]
+            - self.average_image
+        )
         # data = hdu[1].data[:self.cutout_size, 45 : self.cutout_size + 45]
         t_start = hdu[0].header["TSTART"]
 
@@ -345,11 +415,26 @@ class BackDrop(object):
             axis=0,
         )
 
-        avg /= self.weights
+        # I don't care about dividing by zero here
+        with np.errstate(divide="ignore", invalid="ignore"):
+            avg /= self.weights
         B = self._poly_X_down[self.weights.ravel() != 0].T.dot(
             avg.ravel()[self.weights.ravel() != 0]
         )
         poly_w = np.linalg.solve(self.poly_sigma_w_inv, B)
+
+        # Could check here if slice is weird and then nan out the data...
+
+        # # Iterate once
+        # m = self._poly_X_down.dot(poly_w).reshape(
+        #     (self.cutout_size // self.nb, self.cutout_size // self.nb)
+        # )
+        # k = np.abs(avg - m) < 1000
+        # k = (self.weights.ravel() != 0) & k.ravel()
+        # poly_sigma_w_inv = self._poly_X_down[k].T.dot(self._poly_X_down[k])
+        # B = self._poly_X_down[k].T.dot(avg.ravel()[k])
+        # poly_w = np.linalg.solve(poly_sigma_w_inv, B)
+        #
         res = data - self._poly_X.dot(poly_w).reshape(
             (self.cutout_size, self.cutout_size)
         )
@@ -370,7 +455,7 @@ class BackDrop(object):
 
         return (
             t_start,
-            poly_w.reshape((self.npoly, self.npoly)),
+            poly_w,  # .reshape((self.npoly, self.npoly)),
             spline_w,
             strap_w,
             jitter_pix,
@@ -382,7 +467,7 @@ class BackDrop(object):
 
         raise NotImplementedError
 
-    def save(self):
+    def save(self, output=None):
         """
         Save a model fit to the tess-backrop data directory.
 
@@ -437,9 +522,12 @@ class BackDrop(object):
         hdul[0].header["VERSION"] = __version__
         for key in ["sector", "camera", "ccd", "nknots", "npoly", "degree"]:
             hdul[0].header[key] = getattr(self, key)
-        fname = f"tessbackdrop_jitter_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
-        dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
-        hdul.writeto(dir + fname, overwrite=True)
+        if output is None:
+            fname = f"tessbackdrop_jitter_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+            dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+            hdul.writeto(dir + fname, overwrite=True)
+        else:
+            hdul.writeto(output, overwrite=True)
 
     def load(self, sector, camera, ccd):
         """
@@ -772,3 +860,27 @@ def _std_iter(x, mask, sigma=3, n_iters=3):
         std = np.std(x[~m])
         m |= np.abs(x) > (std * sigma)
     return std
+
+
+def _find_bad_frames(fnames, cutout_size=2048):
+    """Identifies frames that probably have a lot of scattered lightkurve
+
+    Loads the 30x30 pixel corner region of a frame, and uses them to find
+    frames that have a lot of scattered light.
+    """
+    corner = np.zeros((4, len(fnames)))
+    for tdx, fname in enumerate(fnames):
+        corner[0, tdx] = fitsio.read(fname)[:30, 45 : 45 + 30].mean()
+        corner[1, tdx] = fitsio.read(fname)[-30:, 45 : 45 + 30].mean()
+        corner[2, tdx] = fitsio.read(fname)[
+            :30, 45 + cutout_size - 30 : 45 + cutout_size
+        ].mean()
+        corner[3, tdx] = fitsio.read(fname)[
+            -30:, 45 + cutout_size - 30 - 1 : 45 + cutout_size
+        ].mean()
+
+    c = corner.T - np.median(corner, axis=1)
+    c /= np.std(c, axis=0)
+    bad = (np.abs(c) > 2).any(axis=1)
+    bad |= corner.std(axis=0) > 200
+    return bad

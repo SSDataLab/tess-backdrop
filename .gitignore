@@ -1,5 +1,6 @@
 sandbox
 __pycache__
 site
-*.fits
+src/tess_backdrop/data
 dist
+pleiades
