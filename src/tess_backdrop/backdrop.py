@@ -45,7 +45,7 @@ class BackDrop(object):
     def __init__(
         self,
         fnames=None,
-        npoly=3,
+        npoly=5,
         nrad=5,
         nknots=40,
         degree=3,
@@ -119,13 +119,8 @@ class BackDrop(object):
         -------
         soft_mask : np.ndarray of bools
             "soft" mask of pixels that, on average, have steep gradients
-        hard_mask : np.ndarray of bools
-            "hard" mask of pixels that, in any frame, have a gradient of over 60 counts
         sat_mask : np.ndarray of bools
             Mask where pixels that are not saturated are True
-        diff_ar : np.ndarray of bools
-            Array with the fraction of pixels in a given frame that are 200 counts
-            different from the previous frame. CHRISTINA GET RID OF THIS
         """
         #        average = np.zeros((self.cutout_size, self.cutout_size))
         #        weights = np.zeros((self.cutout_size, self.cutout_size))
@@ -489,7 +484,7 @@ class BackDrop(object):
                 np.zeros((len(self.fnames), self.jitter_mask.sum())),
             )
         log.info(f"Building frames s{self.sector} c{self.camera} ccd{self.ccd}")
-        points = np.linspace(0, len(self.fnames), 7, dtype=int)
+        points = np.linspace(0, len(self.fnames), 7 + 5, dtype=int)
 
         for idx, fname in enumerate(self.fnames):
             if self.t_start[idx] != 0:
