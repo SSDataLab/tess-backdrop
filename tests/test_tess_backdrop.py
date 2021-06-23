@@ -15,7 +15,7 @@ def is_action():
 
 
 def test_version():
-    assert __version__ == "0.1.2"
+    assert __version__ == "0.1.3"
     print(is_action())
 
 
@@ -24,8 +24,8 @@ def test_version():
 )
 def test_load():
     b = tbd.BackDrop()
-    b.load(2, 1, 3)
-    assert b.sector == 2
+    b.load(1, 1, 3)
+    assert b.sector == 1
     assert b.camera == 1
     assert b.ccd == 3
 
@@ -35,7 +35,7 @@ def test_load():
 
     corr = b.build_correction(np.arange(100, 101), np.arange(200, 201))
     assert len(corr.shape) == 3
-    assert corr.shape == (1245, 1, 1)
+    assert corr.shape == (1282, 1, 1)
 
 
 def test_build():

@@ -51,7 +51,8 @@ class BackDrop(object):
         degree=3,
         nb=8,
         cutout_size=2048,
-        nbatch=20,
+        max_batch_number=20,
+        min_batch_size=5,
         #        reference_frame=0,
     ):
 
@@ -77,12 +78,23 @@ class BackDrop(object):
         self.degree = degree
         self.fnames = fnames
         self.nknots = nknots
+        self.max_batch_number = max_batch_number
+        self.min_batch_size = min_batch_size
         self.nb = nb
         self.cutout_size = cutout_size
         #        self.reference_frame = reference_frame
         #        if self.fnames is not None:
         #            self.reference_image = self.fnames[self.reference_frame]
         if self.fnames is not None:
+            if isinstance(self.fnames, (str, list)):
+                self.fnames = np.asarray(self.fnames)
+            if len(self.fnames) / self.max_batch_number < self.min_batch_size:
+                self.batches = np.array_split(
+                    self.fnames, np.max([1, len(self.fnames) // self.min_batch_size])
+                )
+            else:
+                self.batches = np.array_split(self.fnames, self.max_batch_number)
+
             if len(self.fnames) >= 15:
                 log.info("Finding bad frames")
                 self.bad_frames = _find_bad_frames(
@@ -95,7 +107,6 @@ class BackDrop(object):
         self.knots_wbounds = _get_knots(
             np.arange(self.cutout_size), nknots=nknots, degree=degree
         )
-        self.nbatch = nbatch
 
     def _build_mask(self):
         """Builds a boolean mask for the input image stack which
@@ -123,11 +134,10 @@ class BackDrop(object):
         # sat_mask = None
         # hard_mask = np.zeros((self.cutout_size, self.cutout_size), dtype=bool)
 
-        med_image = np.zeros((self.nbatch, self.cutout_size, self.cutout_size))
-        batches = np.array_split(self.fnames, self.nbatch)
+        med_image = np.zeros((len(self.batches), self.cutout_size, self.cutout_size))
         self.odd_mask = csr_matrix((len(self.fnames), 2048 ** 2), dtype=bool)
 
-        for bdx, batch in enumerate(batches):
+        for bdx, batch in enumerate(self.batches):
             if len(batch) == 0:
                 med_image[bdx, :, :] = np.nan
             else:
@@ -184,7 +194,7 @@ class BackDrop(object):
                     med_image[bdx, :, :] += data
                     batch_count += 1
 
-                    grad = np.gradient(data)
+                    # grad = np.gradient(data)
                     # hard_mask |= np.abs(np.hypot(*grad)) > 50
                 if batch_count > 0:
                     med_image[bdx, :, :] /= batch_count
@@ -310,9 +320,8 @@ class BackDrop(object):
             [self._poly_X, np.hstack([rad ** idx for idx in np.arange(1, self.nrad)])]
         )
 
-        points = np.arange(0, 2048 + 512, 512)
-
         def expand_poly(x, crav, points):
+            points = np.arange(0, 2048 + 512, 512)
             return np.hstack(
                 [
                     x
@@ -462,29 +471,35 @@ class BackDrop(object):
         if not hasattr(self, "_poly_X"):
             self._build_matrices()
 
-        self.poly_w, self.spline_w, self.strap_w, self.t_start, self.jitter_pix = (
-            # np.zeros(
-            #     (
-            #         len(self.fnames),
-            #         self.npoly
-            #         * self.npoly
-            #         * (np.arange(0, 2048 + 512, 512) < self.cutout_size).sum(),
-            #     )
-            # ),
-            # np.zeros((len(self.fnames), self.npoly, self.npoly)),
-            np.zeros((len(self.fnames), self.npoly * self.npoly + self.nrad - 1)),
-            np.zeros((len(self.fnames), self.nknots, self.nknots)),
-            np.zeros((len(self.fnames), self.cutout_size)),
-            np.zeros(len(self.fnames)),
-            np.zeros((len(self.fnames), self.jitter_mask.sum())),
-        )
+        if not hasattr(self, "poly_w"):
+            self.poly_w, self.spline_w, self.strap_w, self.t_start, self.jitter = (
+                # np.zeros(
+                #     (
+                #         len(self.fnames),
+                #         self.npoly
+                #         * self.npoly
+                #         * (np.arange(0, 2048 + 512, 512) < self.cutout_size).sum(),
+                #     )
+                # ),
+                # np.zeros((len(self.fnames), self.npoly, self.npoly)),
+                np.zeros((len(self.fnames), self.npoly * self.npoly + self.nrad - 1)),
+                np.zeros((len(self.fnames), self.nknots, self.nknots)),
+                np.zeros((len(self.fnames), self.cutout_size)),
+                np.zeros(len(self.fnames)),
+                np.zeros((len(self.fnames), self.jitter_mask.sum())),
+            )
         log.info(f"Building frames s{self.sector} c{self.camera} ccd{self.ccd}")
         points = np.linspace(0, len(self.fnames), 7, dtype=int)
+
         for idx, fname in enumerate(self.fnames):
+            if self.t_start[idx] != 0:
+                continue
             if idx in points:
                 log.info(
                     f"Running frames s{self.sector} c{self.camera} ccd{self.ccd} {np.where(points == idx)[0][0] * 20}%"
                 )
+                if idx != 0:
+                    self.save()
             with fits.open(fname, lazy_load_hdus=True) as hdu:
                 if not np.all(
                     [
@@ -505,9 +520,9 @@ class BackDrop(object):
                 self.poly_w[idx, :],
                 self.spline_w[idx, :],
                 self.strap_w[idx, :],
-                self.jitter_pix[idx, :],
+                self.jitter[idx, :],
             ) = self._fit_frame(data)
-
+        self.save()
         # # Smaller version of jitter for use later
         # bad = sigma_clip(np.gradient(self.jitter_pix, axis=1).std(axis=1), sigma=5).mask
         # _, med, std = sigma_clipped_stats(self.jitter_pix[~bad], axis=0)
@@ -517,7 +532,7 @@ class BackDrop(object):
         # X = np.zeros((self.jitter_pix.shape[0], U.shape[1]))
         # X[~bad] = np.copy(U)
         # self.jitter = X
-        self.jitter = np.copy(self.jitter_pix)
+        # self.jitter = np.copy(self.jitter_pix)
 
     def _fit_frame(self, data):
         """Helper function to fit a model to an individual frame."""
@@ -596,7 +611,7 @@ class BackDrop(object):
             - STRAP_W: Solution to the strap model. Has shape (ntimes x self.cutout_size)
             - POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
-        log.info(f"Building saving s{self.sector} c{self.camera} ccd{self.ccd}")
+        log.info(f"Saving s{self.sector} c{self.camera} ccd{self.ccd}")
         if not hasattr(self, "star_mask"):
             raise ValueError(
                 "It does not look like you have regenerated a tess_backdrop model, I do not think you want to save."
