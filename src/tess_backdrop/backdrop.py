@@ -88,6 +88,7 @@ class BackDrop(object):
         if self.fnames is not None:
             if isinstance(self.fnames, (str, list)):
                 self.fnames = np.asarray(self.fnames)
+            self.fnames = np.sort(self.fnames)
             if len(self.fnames) / self.max_batch_number < self.min_batch_size:
                 self.batches = np.array_split(
                     self.fnames, np.max([1, len(self.fnames) // self.min_batch_size])
@@ -484,14 +485,14 @@ class BackDrop(object):
                 np.zeros((len(self.fnames), self.jitter_mask.sum())),
             )
         log.info(f"Building frames s{self.sector} c{self.camera} ccd{self.ccd}")
-        points = np.linspace(0, len(self.fnames), 7 + 5, dtype=int)
+        points = np.linspace(0, len(self.fnames), 12, dtype=int)
 
         for idx, fname in enumerate(self.fnames):
             if self.t_start[idx] != 0:
                 continue
             if idx in points:
                 log.info(
-                    f"Running frames s{self.sector} c{self.camera} ccd{self.ccd} {np.where(points == idx)[0][0] * 20}%"
+                    f"Running frames s{self.sector} c{self.camera} ccd{self.ccd} {np.where(points == idx)[0][0] * 10}%"
                 )
                 if idx != 0:
                     self.save()
@@ -607,14 +608,15 @@ class BackDrop(object):
             - POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
         log.info(f"Saving s{self.sector} c{self.camera} ccd{self.ccd}")
-        if not hasattr(self, "star_mask"):
-            raise ValueError(
-                "It does not look like you have regenerated a tess_backdrop model, I do not think you want to save."
-            )
+        # if not hasattr(self, "star_mask"):
+        #     raise ValueError(
+        #         "It does not look like you have regenerated a tess_backdrop model, I do not think you want to save."
+        #     )
         hdu0 = fits.PrimaryHDU()
+        s = np.argsort(self.t_start)
         cols = [
             fits.Column(
-                name="T_START", format="D", unit="BJD - 2457000", array=self.t_start
+                name="T_START", format="D", unit="BJD - 2457000", array=self.t_start[s]
             ),
         ]
         hdu1 = fits.BinTableHDU.from_columns(cols)
@@ -622,9 +624,9 @@ class BackDrop(object):
             fits.Column(name="KNOTS", format="D", unit="PIX", array=self.knots_wbounds)
         ]
         hdu2 = fits.BinTableHDU.from_columns(cols)
-        hdu3 = fits.ImageHDU(self.spline_w, name="spline_w")
-        hdu4 = fits.ImageHDU(self.strap_w, name="strap_w")
-        hdu5 = fits.ImageHDU(self.poly_w, name="poly_w")
+        hdu3 = fits.ImageHDU(self.spline_w[s], name="spline_w")
+        hdu4 = fits.ImageHDU(self.strap_w[s], name="strap_w")
+        hdu5 = fits.ImageHDU(self.poly_w[s], name="poly_w")
         hdul = fits.HDUList([hdu0, hdu1, hdu2, hdu3, hdu4, hdu5])
         hdul[0].header["ORIGIN"] = "tess-backdrop"
         hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
@@ -642,7 +644,7 @@ class BackDrop(object):
         hdul.writeto(dir + fname, overwrite=True)
 
         hdu0 = fits.PrimaryHDU()
-        hdu1 = fits.ImageHDU(self.jitter, name="jitter_pix")
+        hdu1 = fits.ImageHDU(self.jitter[s], name="jitter_pix")
         hdul = fits.HDUList([hdu0, hdu1])
         hdul[0].header["ORIGIN"] = "tess-backdrop"
         hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
@@ -1004,26 +1006,43 @@ def _std_iter(x, mask, sigma=3, n_iters=3):
     return std
 
 
-def _find_bad_frames(fnames, cutout_size=2048):
+def _find_bad_frames(fnames, cutout_size=2048, corner_check=False):
     """Identifies frames that probably have a lot of scattered lightkurve
+    If quality flags are available, will use TESS quality flags.
 
-    Loads the 30x30 pixel corner region of a frame, and uses them to find
-    frames that have a lot of scattered light.
+    If unavailable, or if `corner_check=True`, loads the 30x30 pixel corner
+    region of every frame, and uses them to find frames that have a lot of
+    scattered light.
+
+
     """
-    corner = np.zeros((4, len(fnames)))
-    for tdx, fname in enumerate(fnames):
-        corner[0, tdx] = fitsio.read(fname)[:30, 45 : 45 + 30].mean()
-        corner[1, tdx] = fitsio.read(fname)[-30:, 45 : 45 + 30].mean()
-        corner[2, tdx] = fitsio.read(fname)[
-            :30, 45 + cutout_size - 30 : 45 + cutout_size
-        ].mean()
-        corner[3, tdx] = fitsio.read(fname)[
-            -30:, 45 + cutout_size - 30 - 1 : 45 + cutout_size
-        ].mean()
 
-    c = corner.T - np.median(corner, axis=1)
-    c /= np.std(c, axis=0)
-    bad = (np.abs(c) > 2).any(axis=1)
-    #    bad |= corner.std(axis=0) > 200
+    quality = np.zeros(len(fnames), int)
+    warned = False
+    for idx, fname in enumerate(fnames):
+        try:
+            quality[idx] = fitsio.read_header(fname, 1)["DQUALITY"]
+        except KeyError:
+            if warned is False:
+                log.warning("Quality flags are missing.")
+                warned = True
+            continue
+    bad = (quality & (2048 | 175)) != 0
 
+    if warned | corner_check:
+        corner = np.zeros((4, len(fnames)))
+        for tdx, fname in enumerate(fnames):
+            corner[0, tdx] = fitsio.read(fname)[:30, 45 : 45 + 30].mean()
+            corner[1, tdx] = fitsio.read(fname)[-30:, 45 : 45 + 30].mean()
+            corner[2, tdx] = fitsio.read(fname)[
+                :30, 45 + cutout_size - 30 : 45 + cutout_size
+            ].mean()
+            corner[3, tdx] = fitsio.read(fname)[
+                -30:, 45 + cutout_size - 30 - 1 : 45 + cutout_size
+            ].mean()
+
+        c = corner.T - np.median(corner, axis=1)
+        c /= np.std(c, axis=0)
+        bad = (np.abs(c) > 2).any(axis=1)
+        #    bad |= corner.std(axis=0) > 200
     return bad

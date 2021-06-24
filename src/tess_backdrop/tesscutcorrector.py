@@ -125,11 +125,13 @@ class TESSCutCorrector(lk.RegressionCorrector):
 
         # Jitter DM
         dm_jitter = lk.DesignMatrix(
-            self.b.jitter[:, :npca_components],
+            self.b.jitter * (cadence_mask & ~bad)[:, None],
             name="jitter",
-            prior_mu=np.zeros(npca_components),
-            prior_sigma=np.ones(npca_components) * self.lc.flux.value.mean() * 0.01,
-        )
+            prior_mu=np.zeros(self.b.jitter.shape[1]),
+            prior_sigma=np.ones(self.b.jitter.shape[1])
+            * self.lc.flux.value.mean()
+            * 0.01,
+        ).pca(npca_components)
 
         dm = lk.SparseDesignMatrixCollection(
             [dm_bkg.to_sparse(), dm_jitter.to_sparse(), dm_spline]
