@@ -1,5 +1,0 @@
-#PBS -l select=1:ncpus=4:model=san
-#PBS -l walltime=1:00:00
-
-seq 4 | parallel -j 4 -u --sshloginfile $PBS_NODEFILE \
- "python test.py {}"
