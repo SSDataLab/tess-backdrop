@@ -23,6 +23,10 @@
         
         <link rel="stylesheet" href="../assets/stylesheets/palette.ef6f36e2.min.css">
         
+          
+          
+          <meta name="theme-color" content="#ff6e42">
+        
       
     
     
@@ -50,7 +54,7 @@
     
     
     
-    <body dir="ltr" data-md-color-scheme="" data-md-color-primary="none" data-md-color-accent="none">
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-orange" data-md-color-accent="blue">
   
     
     <script>function __prefix(e){return new URL("..",location).pathname+"."+e}function __get(e,t=localStorage){return JSON.parse(t.getItem(__prefix(e)))}</script>
@@ -75,7 +79,7 @@
     <a href=".." title="TESS Backdrop" class="md-header__button md-logo" aria-label="TESS Backdrop" data-md-component="logo">
       
   
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54z"/></svg>
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 4V3a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V6h1v4H9v11a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-9h8V4h-3z"/></svg>
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -168,7 +172,7 @@
     <a href=".." title="TESS Backdrop" class="md-nav__button md-logo" aria-label="TESS Backdrop" data-md-component="logo">
       
   
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54z"/></svg>
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 4V3a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V6h1v4H9v11a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-9h8V4h-3z"/></svg>
 
     </a>
     TESS Backdrop
@@ -448,6 +452,12 @@ Recommend ~4.</p></td>
         <td><em>required</em></td>
       </tr>
       <tr>
+        <td><code>nrad</code></td>
+        <td><code>int</code></td>
+        <td><p>The order of polynomial to fit to the data in radius from the boresight</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
         <td><code>nknots</code></td>
         <td><code>int</code></td>
         <td><p>Number of knots to fit in each dimension. Recommend ~40.</p></td>
@@ -464,6 +474,12 @@ Recommend ~4.</p></td>
         <td><code>int</code></td>
         <td><p>Number of bins to downsample to for polynomial fit.</p></td>
         <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>cutout_size</code></td>
+        <td><code>int</code></td>
+        <td><p>Size of cut out to use. Default is 2048, full FFI</p></td>
+        <td><code>&#39;2048&#39;</code></td>
       </tr>
   </tbody>
 </table>
@@ -627,7 +643,7 @@ estimate for the input column, row and times.</p></td>
 
 
 <h2 id="tess_backdrop.backdrop.BackDrop.save" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">save</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+<code class="highlight language-python"><span class="n">save</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">output</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 
 </h2>
@@ -640,7 +656,7 @@ estimate for the input column, row and times.</p></td>
     - T_START: The time array for each background solution
     - KNOTS: Knot spacing in row and column
     - SPLINE_W: Solution to the spline model. Has shape (ntimes x nknots x nknots)
-    - STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
+    - STRAP_W: Solution to the strap model. Has shape (ntimes x self.cutout_size)
     - POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)</p>
 
     </div>
