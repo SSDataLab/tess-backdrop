@@ -7,6 +7,9 @@ import pandas as pd
 from astropy.io import fits
 from lightkurve.correctors.designmatrix import _spline_basis_vector
 from scipy.sparse import csr_matrix, hstack, lil_matrix, vstack
+from fbpca import pca
+from astropy.stats import sigma_clip
+
 
 from . import PACKAGEDIR
 from .version import __version__
@@ -675,8 +678,23 @@ class BackDrop(object):
             hdul.writeto(dir + fname, overwrite=True)
         else:
             hdul.writeto(output, overwrite=True)
+        self._package_jitter_comps()
+        hdu0 = fits.PrimaryHDU()
+        hdu1 = fits.ImageHDU(self.jitter_comps[s], name="jitter_pix")
+        hdul = fits.HDUList([hdu0, hdu1])
+        hdul[0].header["ORIGIN"] = "tess-backdrop"
+        hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
+        hdul[0].header["VERSION"] = __version__
+        for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
+            hdul[0].header[key] = getattr(self, key)
+        if output is None:
+            fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+            dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+            hdul.writeto(dir + fname, overwrite=True)
+        else:
+            hdul.writeto(output, overwrite=True)
 
-    def load(self, sector, camera, ccd):
+    def load(self, sector, camera, ccd, full_jitter=False):
         """
         Load a model fit to the tess-backrop data directory.
 
@@ -706,9 +724,13 @@ class BackDrop(object):
             self.strap_w = hdu[4].data
             self.poly_w = hdu[5].data
 
-        fname = f"tessbackdrop_jitter_sector{sector}_camera{camera}_ccd{ccd}.fits"
+        if full_jitter:
+            fname = f"tessbackdrop_jitter_sector{sector}_camera{camera}_ccd{ccd}.fits"
+            with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
+                self.jitter = hdu[1].data
+        fname = f"tessbackdrop_jitter_components_sector{sector}_camera{camera}_ccd{ccd}.fits"
         with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
-            self.jitter = hdu[1].data
+            self.jitter_comps = hdu[1].data
         if self.ccd in [1, 3]:
             self.bore_pixel = [2048, 2048]
         elif self.ccd in [2, 4]:
@@ -864,6 +886,48 @@ class BackDrop(object):
             times=tdxs,
         )
         return tpf - bkg
+
+    def _package_jitter_comps(self):
+        """Helper function for packaging up jitter components into different
+        time scale components.
+        """
+        # We'll hard code the number of PCA components for now
+
+        npca_components = 30
+        box = np.ones(20) / 20
+        jitter = self.jitter.copy()
+        jitter -= np.median(jitter, axis=0)
+
+        jitter_smooth = np.zeros(self.jitter.shape)
+        for idx in range(jitter.shape[1]):
+            y = jitter[:, idx].copy()
+            jitter_smooth[:, idx] = np.convolve(y, box, mode="same")
+
+        mask = sigma_clip(jitter - jitter_smooth).mask
+        jitter[mask] = 0
+        for idx in range(jitter.shape[1]):
+            y = jitter[:, idx].copy()
+            jitter_smooth[:, idx] = np.convolve(y, box, mode="same")
+
+        box = np.ones(60) / 60
+        jitter_smooth2 = np.zeros(self.jitter.shape)
+        for idx in range(self.jitter.shape[1]):
+            y = jitter_smooth[:, idx].copy()
+            jitter_smooth2[:, idx] = np.convolve(y, box, mode="same")
+
+        short = self.jitter.copy() - np.median(self.jitter, axis=0) - jitter_smooth
+        medium = jitter_smooth - jitter_smooth2
+        long = jitter_smooth2
+
+        X = np.hstack(
+            [
+                pca(short, npca_components, n_iter=10)[0],
+                pca(medium, npca_components, n_iter=10)[0],
+                pca(long, npca_components, n_iter=10)[0],
+            ]
+        )
+        X = np.hstack([X[:, idx::npca_components] for idx in range(npca_components)])
+        self.jitter_comps = X
 
 
 def _get_knots(x, nknots, degree):

@@ -5,3 +5,4 @@ src/tess_backdrop/data
 dist
 pleiades
 .DS_Store
+.ipynb_checkpoints
