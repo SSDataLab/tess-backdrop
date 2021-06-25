@@ -91,7 +91,7 @@ class BackDrop(object):
             self.fnames = np.sort(self.fnames)
             if len(self.fnames) >= 15:
                 log.info("Finding bad frames")
-                self.bad_frames = _find_bad_frames(
+                self.bad_frames, self.quality = _find_bad_frames(
                     self.fnames, cutout_size=self.cutout_size
                 )
             else:
@@ -626,8 +626,17 @@ class BackDrop(object):
         cols = [
             fits.Column(
                 name="T_START", format="D", unit="BJD - 2457000", array=self.t_start[s]
-            ),
+            )
         ]
+        if hasattr(self, "quality"):
+            cols.append(
+                fits.Column(
+                    name="QUALITY",
+                    format="D",
+                    unit="BJD - 2457000",
+                    array=self.quality[s],
+                )
+            )
         hdu1 = fits.BinTableHDU.from_columns(cols)
         cols = [
             fits.Column(name="KNOTS", format="D", unit="PIX", array=self.knots_wbounds)
@@ -690,6 +699,8 @@ class BackDrop(object):
             for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
                 setattr(self, key, hdu[0].header[key])
             self.t_start = hdu[1].data["T_START"]
+            if "QUALITY" in hdu[1].data.names:
+                self.quality = hdu[1].data["QUALITY"]
             self.knots_wbounds = hdu[2].data["KNOTS"]
             self.spline_w = hdu[3].data
             self.strap_w = hdu[4].data
@@ -1054,4 +1065,4 @@ def _find_bad_frames(fnames, cutout_size=2048, corner_check=False):
         c /= np.std(c, axis=0)
         bad = (np.abs(c) > 2).any(axis=1)
         #    bad |= corner.std(axis=0) > 200
-    return bad
+    return bad, quality
