@@ -89,13 +89,6 @@ class BackDrop(object):
             if isinstance(self.fnames, (str, list)):
                 self.fnames = np.asarray(self.fnames)
             self.fnames = np.sort(self.fnames)
-            if len(self.fnames) / self.max_batch_number < self.min_batch_size:
-                self.batches = np.array_split(
-                    self.fnames, np.max([1, len(self.fnames) // self.min_batch_size])
-                )
-            else:
-                self.batches = np.array_split(self.fnames, self.max_batch_number)
-
             if len(self.fnames) >= 15:
                 log.info("Finding bad frames")
                 self.bad_frames = _find_bad_frames(
@@ -103,6 +96,22 @@ class BackDrop(object):
                 )
             else:
                 self.bad_frames = np.zeros(len(self.fnames), bool)
+
+            if (
+                len(self.fnames[~self.bad_frames]) / self.max_batch_number
+                < self.min_batch_size
+            ):
+                self.batches = np.array_split(
+                    self.fnames[~self.bad_frames],
+                    np.max(
+                        [1, len(self.fnames[~self.bad_frames]) // self.min_batch_size]
+                    ),
+                )
+            else:
+                self.batches = np.array_split(
+                    self.fnames[~self.bad_frames], self.max_batch_number
+                )
+
         else:
             self.bad_frames = None
         self.knots_wbounds = _get_knots(
