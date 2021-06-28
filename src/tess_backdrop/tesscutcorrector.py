@@ -113,13 +113,14 @@ class TESSCutCorrector(lk.RegressionCorrector):
         )
         dm_bkg = lk.DesignMatrix(
             np.vstack(
-                [bkg[:, self.aperture_mask].sum(axis=1) ** idx for idx in range(2)]
+                [bkg[:, self.aperture_mask].sum(axis=1) ** idx for idx in range(3)]
             ).T,
             name="sky",
-            prior_mu=[0, 0],
+            prior_mu=[0, 0, 0],
             prior_sigma=[
                 self.lc.flux.value[~bad].std(),
                 self.lc.flux.value[~bad].std() ** 0.5,
+                self.lc.flux.value[~bad].std() ** 0.25,
             ],
         )
 
