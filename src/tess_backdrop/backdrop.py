@@ -51,7 +51,7 @@ class BackDrop(object):
         npoly=5,
         nrad=5,
         nknots=40,
-        degree=3,
+        degree=2,
         nb=8,
         cutout_size=2048,
         max_batch_number=20,
@@ -153,7 +153,7 @@ class BackDrop(object):
                 for fdx, fname in enumerate(batch):
                     fdx += np.where(self.fnames == batch[0])[0][0]
                     with fits.open(fname, lazy_load_hdus=True) as hdu:
-                        if (fname == self.fnames[0]) & (fdx == 0):
+                        if not hasattr(self, "sector"):
                             self.sector = int(fname.split("-s")[1].split("-")[0])
                             self.camera = hdu[1].header["camera"]
                             self.ccd = hdu[1].header["ccd"]
@@ -328,6 +328,10 @@ class BackDrop(object):
             [self._poly_X, np.hstack([rad ** idx for idx in np.arange(1, self.nrad)])]
         )
 
+        # nice wide priors for polynomial
+        self._poly_prior_sigma = np.ones(self._poly_X.shape[1]) * 3000
+        self._poly_prior_mu = np.zeros(self._poly_X.shape[1])
+
         def expand_poly(x, crav, points):
             points = np.arange(0, 2048 + 512, 512)
             return np.hstack(
@@ -403,6 +407,7 @@ class BackDrop(object):
         self.poly_sigma_w_inv = self._poly_X_down[self.weights.ravel() != 0].T.dot(
             self._poly_X_down[self.weights.ravel() != 0]
         )
+        self.poly_sigma_w_inv += np.diag(1 / self._poly_prior_sigma ** 2)
 
         e = lil_matrix((self.cutout_size, self.cutout_size * self.cutout_size))
         for idx in range(self.cutout_size):
@@ -507,7 +512,7 @@ class BackDrop(object):
                     f"Running frames s{self.sector} c{self.camera} ccd{self.ccd} {np.where(points == idx)[0][0] * 10}%"
                 )
                 if idx != 0:
-                    self.save()
+                    self.save(package_jitter_comps=False)
             with fits.open(fname, lazy_load_hdus=True) as hdu:
                 if not np.all(
                     [
@@ -561,6 +566,8 @@ class BackDrop(object):
         B = self._poly_X_down[self.weights.ravel() != 0].T.dot(
             avg.ravel()[self.weights.ravel() != 0]
         )
+        B += self._poly_prior_mu / self._poly_prior_sigma ** 2
+
         poly_w = np.linalg.solve(self.poly_sigma_w_inv, B)
 
         # iterate once
@@ -572,7 +579,9 @@ class BackDrop(object):
             k = np.abs(avg - m) < 300
             k = (self.weights.ravel() != 0) & k.ravel()
             poly_sigma_w_inv = self._poly_X_down[k].T.dot(self._poly_X_down[k])
+            poly_sigma_w_inv += np.diag(1 / self._poly_prior_sigma ** 2)
             B = self._poly_X_down[k].T.dot(avg.ravel()[k])
+            B += self._poly_prior_mu / self._poly_prior_sigma ** 2
             poly_w = np.linalg.solve(poly_sigma_w_inv, B)
 
         res = data - self._poly_X.dot(poly_w).reshape(
@@ -607,7 +616,7 @@ class BackDrop(object):
 
         raise NotImplementedError
 
-    def save(self, output=None):
+    def save(self, output=None, package_jitter_comps=True):
         """
         Save a model fit to the tess-backrop data directory.
 
@@ -678,22 +687,47 @@ class BackDrop(object):
             hdul.writeto(dir + fname, overwrite=True)
         else:
             hdul.writeto(output, overwrite=True)
-        self._package_jitter_comps()
-        if self.jitter_comps is not None:
-            hdu0 = fits.PrimaryHDU()
-            hdu1 = fits.ImageHDU(self.jitter_comps[s], name="jitter_pix")
-            hdul = fits.HDUList([hdu0, hdu1])
-            hdul[0].header["ORIGIN"] = "tess-backdrop"
-            hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
-            hdul[0].header["VERSION"] = __version__
-            for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
-                hdul[0].header[key] = getattr(self, key)
-            if output is None:
-                fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
-                dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
-                hdul.writeto(dir + fname, overwrite=True)
-            else:
-                hdul.writeto(output, overwrite=True)
+        if package_jitter_comps:
+            self._package_jitter_comps()
+            if self.jitter_comps is not None:
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(self.jitter_comps[s], name="jitter_pix")
+                hdul = fits.HDUList([hdu0, hdu1])
+                hdul[0].header["ORIGIN"] = "tess-backdrop"
+                hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
+                hdul[0].header["VERSION"] = __version__
+                for key in [
+                    "sector",
+                    "camera",
+                    "ccd",
+                    "nknots",
+                    "npoly",
+                    "nrad",
+                    "degree",
+                ]:
+                    hdul[0].header[key] = getattr(self, key)
+                if output is None:
+                    fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+                    dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+                    hdul.writeto(dir + fname, overwrite=True)
+                else:
+                    hdul.writeto(output, overwrite=True)
+
+        hdu0 = fits.PrimaryHDU()
+        hdu1 = fits.ImageHDU(self.star_mask.astype(int), name="STARMASK")
+        hdu2 = fits.ImageHDU(self.sat_mask.astype(int), name="SATMASK")
+        hdu3 = fits.ImageHDU(self.average_image, name="AVGIMG")
+        hdul = fits.HDUList([hdu0, hdu1, hdu2, hdu3])
+
+        hdul[0].header["ORIGIN"] = "tess-backdrop"
+        hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
+        hdul[0].header["VERSION"] = __version__
+
+        for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
+            hdul[0].header[key] = getattr(self, key)
+        fname = f"tessbackdrop_masks_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+        dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+        hdul.writeto(dir + fname, overwrite=True)
 
     def load(self, sector, camera, ccd, full_jitter=False):
         """
@@ -730,9 +764,15 @@ class BackDrop(object):
             with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
                 self.jitter = hdu[1].data
         fname = f"tessbackdrop_jitter_components_sector{sector}_camera{camera}_ccd{ccd}.fits"
-        if os.path.isfile(fname):
+        if os.path.isfile(dir + fname):
             with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
                 self.jitter_comps = hdu[1].data
+        fname = f"tessbackdrop_masks_sector{sector}_camera{camera}_ccd{ccd}.fits"
+        if os.path.isfile(dir + fname):
+            with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
+                self.star_mask = hdu[1].data
+                self.sat_mask = hdu[2].data
+                self.average_image = hdu[3].data
         if self.ccd in [1, 3]:
             self.bore_pixel = [2048, 2048]
         elif self.ccd in [2, 4]:
@@ -894,46 +934,63 @@ class BackDrop(object):
         time scale components.
         """
         # We'll hard code the number of PCA components for now
-        if len(self.fnames) < 40:
+        if self.jitter.shape[0] < 40:
             self.jitter_comps = None
             return
         if self.jitter.shape[1] < 50:
             self.jitter_comps = self.jitter.copy()
+            return
         npca_components = 30
         box = np.ones(20) / 20
-        jitter = self.jitter.copy()
-        jitter -= np.median(jitter, axis=0)
 
-        jitter_smooth = np.zeros(self.jitter.shape)
-        for idx in range(jitter.shape[1]):
-            y = jitter[:, idx].copy()
-            jitter_smooth[:, idx] = np.convolve(y, box, mode="same")
-
-        mask = sigma_clip(jitter - jitter_smooth).mask
-        jitter[mask] = 0
-        for idx in range(jitter.shape[1]):
-            y = jitter[:, idx].copy()
-            jitter_smooth[:, idx] = np.convolve(y, box, mode="same")
-
-        box = np.ones(60) / 60
-        jitter_smooth2 = np.zeros(self.jitter.shape)
-        for idx in range(self.jitter.shape[1]):
-            y = jitter_smooth[:, idx].copy()
-            jitter_smooth2[:, idx] = np.convolve(y, box, mode="same")
-
-        short = self.jitter.copy() - np.median(self.jitter, axis=0) - jitter_smooth
-        medium = jitter_smooth - jitter_smooth2
-        long = jitter_smooth2
-
-        X = np.hstack(
-            [
-                pca(short, npca_components, n_iter=10)[0],
-                pca(medium, npca_components, n_iter=10)[0],
-                pca(long, npca_components, n_iter=10)[0],
-            ]
+        X = []
+        breaks = (
+            np.where(np.diff(self.t_start) > np.median(np.diff(self.t_start) * 10))[0]
+            + 1
         )
-        X = np.hstack([X[:, idx::npca_components] for idx in range(npca_components)])
-        self.jitter_comps = X
+        breaks = np.hstack([0, breaks, len(self.t_start)])
+        for x1, x2 in zip(breaks[:-1], breaks[1:]):
+            jitter = self.jitter[x1:x2].copy()
+            jitter -= np.median(jitter, axis=0)
+
+            jitter_smooth = np.zeros(jitter.shape)
+            for idx in range(jitter.shape[1]):
+                y = jitter[:, idx].copy()
+                jitter_smooth[:, idx] = np.convolve(y, box, mode="same")
+
+            mask = sigma_clip(jitter - jitter_smooth).mask
+            jitter[mask] = 0
+            for idx in range(jitter.shape[1]):
+                y = jitter[:, idx].copy()
+                jitter_smooth[:, idx] = np.convolve(y, box, mode="same")
+
+            box = np.ones(60) / 60
+            jitter_smooth2 = np.zeros(jitter.shape)
+            for idx in range(jitter.shape[1]):
+                y = jitter_smooth[:, idx].copy()
+                jitter_smooth2[:, idx] = np.convolve(y, box, mode="same")
+
+            short = (
+                self.jitter[x1:x2].copy()
+                - np.median(self.jitter[x1:x2], axis=0)
+                - jitter_smooth
+            )
+            medium = jitter_smooth - jitter_smooth2
+            long = jitter_smooth2
+
+            X1 = np.hstack(
+                [
+                    pca(short, npca_components, n_iter=10)[0],
+                    pca(medium, npca_components, n_iter=10)[0],
+                    pca(long, npca_components, n_iter=10)[0],
+                ]
+            )
+            X1 = np.hstack(
+                [X1[:, idx::npca_components] for idx in range(npca_components)]
+            )
+            X.append(X1)
+
+        self.jitter_comps = np.vstack(X)
 
 
 def _get_knots(x, nknots, degree):
@@ -1109,6 +1166,8 @@ def _find_bad_frames(fnames, cutout_size=2048, corner_check=False):
 
     quality = np.zeros(len(fnames), int)
     warned = False
+
+    log.info("Extracting quality")
     for idx, fname in enumerate(fnames):
         try:
             quality[idx] = fitsio.read_header(fname, 1)["DQUALITY"]
@@ -1120,6 +1179,7 @@ def _find_bad_frames(fnames, cutout_size=2048, corner_check=False):
     bad = (quality & (2048 | 175)) != 0
 
     if warned | corner_check:
+        log.info("Using corner check")
         corner = np.zeros((4, len(fnames)))
         for tdx, fname in enumerate(fnames):
             corner[0, tdx] = fitsio.read(fname)[:30, 45 : 45 + 30].mean()
