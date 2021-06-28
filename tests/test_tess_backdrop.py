@@ -15,7 +15,7 @@ def is_action():
 
 
 def test_version():
-    assert __version__ == "0.1.4"
+    assert __version__ == "0.1.5"
     print(is_action())
 
 
