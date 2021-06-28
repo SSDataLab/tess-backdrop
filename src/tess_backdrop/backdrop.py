@@ -679,20 +679,21 @@ class BackDrop(object):
         else:
             hdul.writeto(output, overwrite=True)
         self._package_jitter_comps()
-        hdu0 = fits.PrimaryHDU()
-        hdu1 = fits.ImageHDU(self.jitter_comps[s], name="jitter_pix")
-        hdul = fits.HDUList([hdu0, hdu1])
-        hdul[0].header["ORIGIN"] = "tess-backdrop"
-        hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
-        hdul[0].header["VERSION"] = __version__
-        for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
-            hdul[0].header[key] = getattr(self, key)
-        if output is None:
-            fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
-            dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
-            hdul.writeto(dir + fname, overwrite=True)
-        else:
-            hdul.writeto(output, overwrite=True)
+        if self.jitter_comps is not None:
+            hdu0 = fits.PrimaryHDU()
+            hdu1 = fits.ImageHDU(self.jitter_comps[s], name="jitter_pix")
+            hdul = fits.HDUList([hdu0, hdu1])
+            hdul[0].header["ORIGIN"] = "tess-backdrop"
+            hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
+            hdul[0].header["VERSION"] = __version__
+            for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
+                hdul[0].header[key] = getattr(self, key)
+            if output is None:
+                fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+                dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+                hdul.writeto(dir + fname, overwrite=True)
+            else:
+                hdul.writeto(output, overwrite=True)
 
     def load(self, sector, camera, ccd, full_jitter=False):
         """
@@ -729,8 +730,9 @@ class BackDrop(object):
             with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
                 self.jitter = hdu[1].data
         fname = f"tessbackdrop_jitter_components_sector{sector}_camera{camera}_ccd{ccd}.fits"
-        with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
-            self.jitter_comps = hdu[1].data
+        if os.path.isfile(fname):
+            with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
+                self.jitter_comps = hdu[1].data
         if self.ccd in [1, 3]:
             self.bore_pixel = [2048, 2048]
         elif self.ccd in [2, 4]:
@@ -892,7 +894,11 @@ class BackDrop(object):
         time scale components.
         """
         # We'll hard code the number of PCA components for now
-
+        if len(self.fnames) < 40:
+            self.jitter_comps = None
+            return
+        if self.jitter.shape[1] < 50:
+            self.jitter_comps = self.jitter.copy()
         npca_components = 30
         box = np.ones(20) / 20
         jitter = self.jitter.copy()

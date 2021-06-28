@@ -45,5 +45,5 @@ def test_build():
         + "/tests/data/tess2018206192942-s0001-1-4-0120-s_ffic.fits"
     ]
     cutout_size = 128
-    b = tbd.BackDrop(fnames, cutout_size=cutout_size, nknots=5)
+    b = tbd.BackDrop(np.hstack([fnames, fnames]), cutout_size=cutout_size, nknots=5)
     b.fit_model()
