@@ -8,3 +8,4 @@ dist
 pleiades
 .DS_Store
 .ipynb_checkpoints
+*.fits

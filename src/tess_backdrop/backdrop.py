@@ -649,11 +649,11 @@ class BackDrop(object):
                     array=self.quality[s],
                 )
             )
-        hdu1 = fits.BinTableHDU.from_columns(cols)
+        hdu1 = fits.BinTableHDU.from_columns(cols, name="QUALITY")
         cols = [
             fits.Column(name="KNOTS", format="D", unit="PIX", array=self.knots_wbounds)
         ]
-        hdu2 = fits.BinTableHDU.from_columns(cols)
+        hdu2 = fits.BinTableHDU.from_columns(cols, name="KNOTS")
         hdu3 = fits.ImageHDU(self.spline_w[s], name="spline_w")
         hdu4 = fits.ImageHDU(self.strap_w[s], name="strap_w")
         hdu5 = fits.ImageHDU(self.poly_w[s], name="poly_w")

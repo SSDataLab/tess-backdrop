@@ -3,6 +3,7 @@ nav:
     - Home: index.md
     - DemoTPF: demo.ipynb
     - DemoLightCurve: lightcurve-example.ipynb
+    - DemoModel: fit-model-example.ipynb
     - BackDrop API Docs: backdrop.md
     - Corrector API Docs: corrector.md
 
