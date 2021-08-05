@@ -616,7 +616,7 @@ class BackDrop(object):
 
         raise NotImplementedError
 
-    def save(self, output=None, package_jitter_comps=True):
+    def save(self, output_dir=None, package_jitter_comps=True):
         """
         Save a model fit to the tess-backrop data directory.
 
@@ -668,10 +668,13 @@ class BackDrop(object):
         fname = (
             f"tessbackdrop_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
         )
-        dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
-        if not os.path.isdir(dir):
-            os.makedirs(dir)
-        hdul.writeto(dir + fname, overwrite=True)
+        if output_dir is None:
+            dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+            if not os.path.isdir(dir):
+                os.makedirs(dir)
+            hdul.writeto(dir + fname, overwrite=True)
+        else:
+            hdul.writeto(output_dir + fname, overwrite=True)
 
         hdu0 = fits.PrimaryHDU()
         hdu1 = fits.ImageHDU(self.jitter[s], name="jitter_pix")
@@ -681,12 +684,12 @@ class BackDrop(object):
         hdul[0].header["VERSION"] = __version__
         for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
             hdul[0].header[key] = getattr(self, key)
-        if output is None:
-            fname = f"tessbackdrop_jitter_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+        fname = f"tessbackdrop_jitter_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+        if output_dir is None:
             dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
             hdul.writeto(dir + fname, overwrite=True)
         else:
-            hdul.writeto(output, overwrite=True)
+            hdul.writeto(output_dir + fname, overwrite=True)
         if package_jitter_comps:
             self._package_jitter_comps()
             if self.jitter_comps is not None:
@@ -706,12 +709,12 @@ class BackDrop(object):
                     "degree",
                 ]:
                     hdul[0].header[key] = getattr(self, key)
-                if output is None:
-                    fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+                fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+                if output_dir is None:
                     dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
                     hdul.writeto(dir + fname, overwrite=True)
                 else:
-                    hdul.writeto(output, overwrite=True)
+                    hdul.writeto(output_dir + fname, overwrite=True)
 
         hdu0 = fits.PrimaryHDU()
         hdu1 = fits.ImageHDU(self.star_mask.astype(int), name="STARMASK")
@@ -726,8 +729,11 @@ class BackDrop(object):
         for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
             hdul[0].header[key] = getattr(self, key)
         fname = f"tessbackdrop_masks_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
-        dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
-        hdul.writeto(dir + fname, overwrite=True)
+        if output_dir is None:
+            dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+            hdul.writeto(dir + fname, overwrite=True)
+        else:
+            hdul.writeto(output_dir + fname, overwrite=True)
 
     def load(self, sector, camera, ccd, full_jitter=False):
         """
