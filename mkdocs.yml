@@ -8,6 +8,12 @@ nav:
 
 theme:
   name: "material"
+  icon:
+    logo: material/format-paint
+  palette:
+    scheme: default
+    primary: deep orange
+    accent: blue
 repo_url: https://github.com/SSDataLab/tess-backdrop
 plugins:
   - search

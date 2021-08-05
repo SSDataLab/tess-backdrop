@@ -9,7 +9,7 @@ all: mypy pytest flake8
 
 # Run the unit tests using `pytest`
 pytest:
-	$(CMD) pytest $(PYMODULE) $(TESTS)
+	$(CMD) pytest -s $(PYMODULE) $(TESTS)
 
 # Lint the code using `flake8`
 flake8:

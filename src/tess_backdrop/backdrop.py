@@ -1,17 +1,20 @@
+import logging
 import os
 
 import fitsio
 import numpy as np
 import pandas as pd
 from astropy.io import fits
-from astropy.stats import sigma_clip, sigma_clipped_stats
-from fbpca import pca
 from lightkurve.correctors.designmatrix import _spline_basis_vector
 from scipy.sparse import csr_matrix, hstack, lil_matrix, vstack
-from tqdm import tqdm
+from fbpca import pca
+from astropy.stats import sigma_clip
+
 
 from . import PACKAGEDIR
 from .version import __version__
+
+log = logging.getLogger(__name__)
 
 
 class BackDrop(object):
@@ -30,21 +33,29 @@ class BackDrop(object):
     npoly: int
         The order of polynomial to fit to the data in both x and y dimension.
         Recommend ~4.
+    nrad: int
+        The order of polynomial to fit to the data in radius from the boresight
     nknots: int
         Number of knots to fit in each dimension. Recommend ~40.
     degree: int
         Degree of spline to fit.
     nb: int
         Number of bins to downsample to for polynomial fit.
+    cutout_size : int
+        Size of cut out to use. Default is 2048, full FFI
     """
 
     def __init__(
         self,
         fnames=None,
-        npoly=4,
+        npoly=5,
+        nrad=5,
         nknots=40,
-        degree=3,
+        degree=2,
         nb=8,
+        cutout_size=2048,
+        max_batch_number=20,
+        min_batch_size=5,
         #        reference_frame=0,
     ):
 
@@ -65,15 +76,50 @@ class BackDrop(object):
         """
 
         self.npoly = npoly
+        self.nrad = nrad
         self.nknots = nknots
         self.degree = degree
         self.fnames = fnames
         self.nknots = nknots
+        self.max_batch_number = max_batch_number
+        self.min_batch_size = min_batch_size
         self.nb = nb
+        self.cutout_size = cutout_size
         #        self.reference_frame = reference_frame
         #        if self.fnames is not None:
         #            self.reference_image = self.fnames[self.reference_frame]
-        self.knots_wbounds = _get_knots(np.arange(2048), nknots=nknots, degree=degree)
+        if self.fnames is not None:
+            if isinstance(self.fnames, (str, list)):
+                self.fnames = np.asarray(self.fnames)
+            self.fnames = np.sort(self.fnames)
+            if len(self.fnames) >= 15:
+                log.info("Finding bad frames")
+                self.bad_frames, self.quality = _find_bad_frames(
+                    self.fnames, cutout_size=self.cutout_size
+                )
+            else:
+                self.bad_frames = np.zeros(len(self.fnames), bool)
+
+            if (
+                len(self.fnames[~self.bad_frames]) / self.max_batch_number
+                < self.min_batch_size
+            ):
+                self.batches = np.array_split(
+                    self.fnames[~self.bad_frames],
+                    np.max(
+                        [1, len(self.fnames[~self.bad_frames]) // self.min_batch_size]
+                    ),
+                )
+            else:
+                self.batches = np.array_split(
+                    self.fnames[~self.bad_frames], self.max_batch_number
+                )
+
+        else:
+            self.bad_frames = None
+        self.knots_wbounds = _get_knots(
+            np.arange(self.cutout_size), nknots=nknots, degree=degree
+        )
 
     def _build_mask(self):
         """Builds a boolean mask for the input image stack which
@@ -86,98 +132,240 @@ class BackDrop(object):
         -------
         soft_mask : np.ndarray of bools
             "soft" mask of pixels that, on average, have steep gradients
-        hard_mask : np.ndarray of bools
-            "hard" mask of pixels that, in any frame, have a gradient of over 60 counts
         sat_mask : np.ndarray of bools
             Mask where pixels that are not saturated are True
-        diff_ar : np.ndarray of bools
-            Array with the fraction of pixels in a given frame that are 200 counts
-            different from the previous frame.
         """
-        average = np.zeros((2048, 2048))
-        weights = np.zeros((2048, 2048))
+        #        average = np.zeros((self.cutout_size, self.cutout_size))
+        #        weights = np.zeros((self.cutout_size, self.cutout_size))
         diff = None
-        diff_ar = np.zeros(len(self.fnames))
-        sat_mask = None
-        hard_mask = np.zeros((2048, 2048), dtype=bool)
-        for fdx, fname in enumerate(tqdm(self.fnames, desc="Building Pixel Mask")):
-            with fits.open(fname, lazy_load_hdus=True) as hdu:
-                if fname == self.fnames[0]:
-                    self.sector = int(fname.split("-s")[1].split("-")[0])
-                    self.camera = hdu[1].header["camera"]
-                    self.ccd = hdu[1].header["ccd"]
-                if not np.all(
-                    [
-                        self.sector == int(fname.split("-s")[1].split("-")[0]),
-                        self.camera == hdu[1].header["camera"],
-                        self.ccd == hdu[1].header["ccd"],
-                    ]
-                ):
-                    raise ValueError("All files must have same sector, camera, ccd.")
+        # diff_ar = np.zeros(len(self.fnames))
+        # sat_mask = None
+        # hard_mask = np.zeros((self.cutout_size, self.cutout_size), dtype=bool)
 
-            data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
-            k = (data > 0) & (data < 1500)
-            # Blown out frames do not count.
-            if (~k).sum() / (2048 ** 2) > 0.1:
-                continue
-            if diff is None:
-                diff = data.copy()
+        med_image = np.zeros((len(self.batches), self.cutout_size, self.cutout_size))
+        self.odd_mask = csr_matrix((len(self.fnames), 2048 ** 2), dtype=bool)
+
+        for bdx, batch in enumerate(self.batches):
+            if len(batch) == 0:
+                med_image[bdx, :, :] = np.nan
             else:
-                diff -= data
-                diff_ar[fdx] = (np.abs(diff) > 200).sum() / (2048 ** 2)
-                if (np.abs(diff) > 200).sum() / (2048 ** 2) > 0.002:
-                    diff = data.copy()
-                    continue
-                diff = data.copy()
-            if sat_mask is None:
-                sat_mask = get_saturation_mask(data)
-            grad = np.gradient(data)
-            hard_mask |= np.hypot(*grad) > 60
+                batch_count = 0
+                for fdx, fname in enumerate(batch):
+                    fdx += np.where(self.fnames == batch[0])[0][0]
+                    with fits.open(fname, lazy_load_hdus=True) as hdu:
+                        if not hasattr(self, "sector"):
+                            self.sector = int(fname.split("-s")[1].split("-")[0])
+                            self.camera = hdu[1].header["camera"]
+                            self.ccd = hdu[1].header["ccd"]
+                            if self.ccd in [1, 3]:
+                                self.bore_pixel = [2048, 2048]
+                            elif self.ccd in [2, 4]:
+                                self.bore_pixel = [2048, 0]
+                            log.info(
+                                f"Building mask s{self.sector} c{self.camera} ccd{self.ccd}"
+                            )
+                        if not np.all(
+                            [
+                                self.sector == int(fname.split("-s")[1].split("-")[0]),
+                                self.camera == hdu[1].header["camera"],
+                                self.ccd == hdu[1].header["ccd"],
+                            ]
+                        ):
+                            raise ValueError(
+                                "All files must have same sector, camera, ccd."
+                            )
+                    # Bad frames do not count.
+                    if self.bad_frames[fdx]:
+                        continue
+                    data = fitsio.read(fname)[
+                        : self.cutout_size, 45 : self.cutout_size + 45
+                    ]
+                    k = (data > 0) & (data < 1500)
+                    # Blown out frames do not count.
+                    if (~k).sum() / (self.cutout_size ** 2) > 0.05:
+                        self.bad_frames[fdx] = True
+                        continue
+                    data -= np.median(data[::16, ::16])
+                    if diff is None:
+                        diff = data.copy()
+                    else:
+                        diff -= data
+                        # diff_ar[fdx] = (np.abs(diff) > 200).sum() / (
+                        #    self.cutout_size ** 2
+                        # )
+                        if (np.abs(diff) > 200).sum() / (self.cutout_size ** 2) > 0.2:
+                            diff = data.copy()
+                            self.bad_frames[fdx] = True
+                            continue
+                        diff = data.copy()
 
-            average[k] += data[k] - np.mean(data[k])
-            weights[k] += 1
-        average /= weights
-        soft_mask = (np.hypot(*np.gradient(average)) > 30) | (weights == 0)
-        soft_mask |= np.any(np.gradient(soft_mask.astype(float)), axis=0) != 0
+                    med_image[bdx, :, :] += data
+                    batch_count += 1
 
-        self.star_mask = ~(hard_mask | soft_mask | ~sat_mask)
+                    # grad = np.gradient(data)
+                    # hard_mask |= np.abs(np.hypot(*grad)) > 50
+                if batch_count > 0:
+                    med_image[bdx, :, :] /= batch_count
+                else:
+                    med_image[bdx, :, :] = np.nan
+
+        med_image = np.nanmedian(med_image, axis=0)
+        self.average_image = med_image
+        del med_image
+        self.average_image -= np.nanmedian(self.average_image)
+        self._straps_removed_from_average = False
+
+        soft_mask = np.hypot(*np.gradient(self.average_image)) > 10  # | (weights == 0)
+
+        sat_mask = get_saturation_mask(self.average_image, cutout_size=self.cutout_size)
+        # asteroid_mask = np.zeros((self.cutout_size, self.cutout_size), dtype=bool)
+        #
+        # binsize = 128
+        # for fdx, fname in enumerate(self.fnames):
+        #     data = fitsio.read(fname)[: self.cutout_size, 45 : self.cutout_size + 45]
+        #     data -= np.median(data)
+        #     data -= self.average_image
+        #     m = (data > 500) | (data < 0) & soft_mask
+        #     if self.cutout_size > binsize:
+        #         check = np.asarray(
+        #             [
+        #                 m[idx::binsize, jdx::binsize]
+        #                 for idx in range(binsize)
+        #                 for jdx in range(binsize)
+        #             ]
+        #         ).sum(axis=0) / (binsize ** 2)
+        #     else:
+        #         check = m
+        #     if (check > 0.05).any():
+        #         self.odd_mask[fdx] = csr_matrix(m.ravel())
+        #     check = np.kron(
+        #         check,
+        #         np.ones(
+        #             (binsize, binsize),
+        #             dtype=int,
+        #         ),
+        #     )
+        #     grad = np.gradient(np.abs(data))
+        #     asteroid_mask |= (np.hypot(*grad) > 30) & (check < 0.05)
+        #
+        # import pdb
+        # import matplotlib.pyplot as plt
+        #
+        # pdb.set_trace()
+        # del data
+
+        # # I don't care about dividing by zero here
+        # with np.errstate(divide="ignore", invalid="ignore"):
+        #     average /= weights
+
+        # soft_mask = (np.hypot(*np.gradient(average)) > 10) | (weights == 0)
+        # soft_mask = (average > 20) | (weights == 0)
+        # soft_mask |= np.any(np.gradient(soft_mask.astype(float)), axis=0) != 0
+
+        # This makes the soft mask slightly more generous
+        def enlarge_mask(mask):
+            m = np.zeros((self.cutout_size, self.cutout_size))
+            m[1:-1, 1:-1] += mask[:-2, 1:-1].astype(int)
+            m[1:-1, 1:-1] += mask[2:, 1:-1].astype(int)
+            m[1:-1, 1:-1] += mask[1:-1, :-2].astype(int)
+            m[1:-1, 1:-1] += mask[1:-1, 2:].astype(int)
+            mask |= m >= 3
+
+        enlarge_mask(soft_mask)
+        #        enlarge_mask(asteroid_mask)
+
+        #        self.star_mask = ~(hard_mask | asteroid_mask | soft_mask | ~sat_mask)
+        self.star_mask = ~(soft_mask | ~sat_mask)
         self.sat_mask = sat_mask
 
         # We don't need all these pixels, it's too many to store for every frame.
         # Instead we'll just save 5000 of them.
-        s = np.random.choice((soft_mask & sat_mask).sum(), size=5000, replace=False)
-        l = np.asarray(np.where(soft_mask & sat_mask))
-        l = l[:, s]
-        self.jitter_mask = np.zeros((2048, 2048), bool)
-        self.jitter_mask[l[0], l[1]] = True
+        if (soft_mask & sat_mask).sum() > 5000:
+            s = np.random.choice((soft_mask & sat_mask).sum(), size=5000, replace=False)
+            l = np.asarray(np.where(soft_mask & sat_mask))
+            l = l[:, s]
+            self.jitter_mask = np.zeros((self.cutout_size, self.cutout_size), bool)
+            self.jitter_mask[l[0], l[1]] = True
+        else:
+            self.jitter_mask = np.copy((soft_mask & sat_mask))
+        # fname = self.fnames[len(self.fnames) // 2]
+        # data = fitsio.read(fname)[: self.cutout_size, 45 : self.cutout_size + 45]
+        # grad = np.asarray(np.gradient(data))
+        # self.median_data = data[self.jitter_mask]
+        # self.median_gradient = grad[:, self.jitter_mask]
+        self.median_data = self.average_image[self.jitter_mask]
+        self.median_gradient = np.asarray(np.gradient(self.average_image))[
+            :, self.jitter_mask
+        ]
 
-        #        with fits.open(self.fnames[self.reference_frame]) as hdu:
-        fname = self.fnames[len(self.fnames) // 2]
-        data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
-        grad = np.asarray(np.gradient(data))
-        self.median_data = data[self.jitter_mask]
-        self.median_gradient = grad[:, self.jitter_mask]
-
-        return soft_mask, hard_mask, sat_mask, diff_ar
+        return soft_mask, sat_mask  # , diff_ar
 
     def _build_matrices(self):
         """Allocate the matrices to fit the background.
         When we want to build the matrices to evaluate this background model,
         we will be able do so in a slightly more efficient way."""
-        row, column = np.mgrid[:2048, :2048]
-        c, r = column / 2048 - 0.5, row / 2048 - 0.5
+        log.info(f"Building matrices s{self.sector} c{self.camera} ccd{self.ccd}")
+
+        row, column = np.mgrid[: self.cutout_size, : self.cutout_size]
+        c, r = column / self.cutout_size - 0.5, row / self.cutout_size - 0.5
+        crav = c.ravel()
+        rrav = r.ravel()
 
         self._poly_X = np.asarray(
             [
-                c.ravel() ** idx * r.ravel() ** jdx
+                crav ** idx * rrav ** jdx
                 for idx in np.arange(self.npoly)
                 for jdx in np.arange(self.npoly)
             ]
         ).T
 
-        row, column = np.mgrid[: 2048 // self.nb, : 2048 // self.nb] * self.nb
+        c, r = (column - self.bore_pixel[1]) / 2048, (row - self.bore_pixel[0]) / 2048
+        crav = c.ravel()
+        rrav = r.ravel()
+        rad = (crav ** 2 + rrav ** 2)[:, None] ** 0.5
+
+        self._poly_X = np.hstack(
+            [self._poly_X, np.hstack([rad ** idx for idx in np.arange(1, self.nrad)])]
+        )
+
+        # nice wide priors for polynomial
+        self._poly_prior_sigma = np.ones(self._poly_X.shape[1]) * 3000
+        self._poly_prior_mu = np.zeros(self._poly_X.shape[1])
+
+        def expand_poly(x, crav, points):
+            points = np.arange(0, 2048 + 512, 512)
+            return np.hstack(
+                [
+                    x
+                    * (
+                        (((crav + 0.5) * self.cutout_size) >= p1)
+                        & (((crav + 0.5) * self.cutout_size) < p2)
+                    )[:, None]
+                    for p1, p2 in zip(points[:-1], points[1:])
+                    if (
+                        (((crav + 0.5) * self.cutout_size) >= p1)
+                        & (((crav + 0.5) * self.cutout_size) < p2)
+                    ).any()
+                ]
+            )
+
+        # self._poly_X = expand_poly(self._poly_X, crav, points)
+        del (
+            row,
+            column,
+            c,
+            r,
+        )
+        del crav, rrav
+
+        row, column = (
+            np.mgrid[: self.cutout_size // self.nb, : self.cutout_size // self.nb]
+            * self.nb
+        )
         row, column = row + self.nb / 2, column + self.nb / 2
-        c, r = column / 2048 - 0.5, row / 2048 - 0.5
+        c, r = column / self.cutout_size - 0.5, row / self.cutout_size - 0.5
+        crav = c.ravel()
+        rrav = r.ravel()
 
         self.weights = np.sum(
             [
@@ -190,31 +378,71 @@ class BackDrop(object):
 
         self._poly_X_down = np.asarray(
             [
-                c.ravel() ** idx * r.ravel() ** jdx
+                crav ** idx * rrav ** jdx
                 for idx in np.arange(self.npoly)
                 for jdx in np.arange(self.npoly)
             ]
         ).T
+
+        c, r = (column - self.bore_pixel[1]) / 2048, (row - self.bore_pixel[0]) / 2048
+        crav = c.ravel()
+        rrav = r.ravel()
+        rad = (crav ** 2 + rrav ** 2)[:, None] ** 0.5
+        self._poly_X_down = np.hstack(
+            [
+                self._poly_X_down,
+                np.hstack([rad ** idx for idx in np.arange(1, self.nrad)]),
+            ]
+        )
+
+        # self._poly_X_down = expand_poly(self._poly_X_down, crav, points)
+        del (
+            row,
+            column,
+            c,
+            r,
+        )
+        del crav, rrav
+
         self.poly_sigma_w_inv = self._poly_X_down[self.weights.ravel() != 0].T.dot(
             self._poly_X_down[self.weights.ravel() != 0]
         )
+        self.poly_sigma_w_inv += np.diag(1 / self._poly_prior_sigma ** 2)
 
-        e = lil_matrix((2048, 2048 * 2048))
-        for idx in range(2048):
-            e[idx, np.arange(2048) * 2048 + idx] = 1
+        e = lil_matrix((self.cutout_size, self.cutout_size * self.cutout_size))
+        for idx in range(self.cutout_size):
+            e[idx, np.arange(self.cutout_size) * self.cutout_size + idx] = 1
+
         self._strap_X = e.T.tocsr()
-        self._spline_X = self._get_spline_matrix(np.arange(2048))
+        del e
+        self._spline_X = self._get_spline_matrix(np.arange(self.cutout_size))
         self.X = hstack([self._spline_X, self._strap_X], format="csr")
 
         # We'll sacrifice some memory here for speed later.
-        self.XT = self.X.T.tocsr()
-        self.Xm = self.X[self.star_mask.ravel()].tocsr()
+        # self.XT = self.X.T.tocsr()
+        # self.Xm = self.X[self.star_mask.ravel()].tocsr()
         self.XmT = self.X[self.star_mask.ravel()].T.tocsr()
         self.prior_mu = np.zeros(self._spline_X.shape[1] + self._strap_X.shape[1])
         self.prior_sigma = (
             np.ones(self._spline_X.shape[1] + self._strap_X.shape[1]) * 40
         )
-        self.sigma_w_inv = self.XmT.dot(self.Xm) + np.diag(1 / self.prior_sigma ** 2)
+        self.prior_sigma[: self._spline_X.shape[1]] *= 10
+        self.sigma_w_inv = self.XmT.dot(
+            self.X[self.star_mask.ravel()].tocsr()
+        ) + np.diag(1 / self.prior_sigma ** 2)
+        if not self._straps_removed_from_average:
+            log.info(
+                f"Correcting average image s{self.sector} c{self.camera} ccd{self.ccd}"
+            )
+            self._straps_removed_from_average = True
+            fit_results = self._fit_frame(self.average_image)
+            self.average_image -= fit_results[2][None, :]
+            self.average_image -= self._poly_X.dot(fit_results[0]).reshape(
+                (self.cutout_size, self.cutout_size)
+            )
+            self.average_image -= self._spline_X.dot(fit_results[1].ravel()).reshape(
+                (self.cutout_size, self.cutout_size)
+            )
 
     def _get_spline_matrix(self, xc, xr=None):
         """Helper function to make a 2D spline matrix in a fairly memory efficient way."""
@@ -256,51 +484,71 @@ class BackDrop(object):
         if not hasattr(self, "_poly_X"):
             self._build_matrices()
 
-        self.poly_w, self.spline_w, self.strap_w, self.t_start, self.jitter_pix = (
-            np.zeros((len(self.fnames), self.npoly, self.npoly)),
-            np.zeros((len(self.fnames), self.nknots, self.nknots)),
-            np.zeros((len(self.fnames), 2048)),
-            np.zeros(len(self.fnames)),
-            np.zeros((len(self.fnames), self.jitter_mask.sum())),
-        )
+        if not hasattr(self, "poly_w"):
+            self.poly_w, self.spline_w, self.strap_w, self.t_start, self.jitter = (
+                # np.zeros(
+                #     (
+                #         len(self.fnames),
+                #         self.npoly
+                #         * self.npoly
+                #         * (np.arange(0, 2048 + 512, 512) < self.cutout_size).sum(),
+                #     )
+                # ),
+                # np.zeros((len(self.fnames), self.npoly, self.npoly)),
+                np.zeros((len(self.fnames), self.npoly * self.npoly + self.nrad - 1)),
+                np.zeros((len(self.fnames), self.nknots, self.nknots)),
+                np.zeros((len(self.fnames), self.cutout_size)),
+                np.zeros(len(self.fnames)),
+                np.zeros((len(self.fnames), self.jitter_mask.sum())),
+            )
+        log.info(f"Building frames s{self.sector} c{self.camera} ccd{self.ccd}")
+        points = np.linspace(0, len(self.fnames), 12, dtype=int)
 
-        for idx, fname in enumerate(tqdm(self.fnames, desc="Fitting FFI Frames")):
+        for idx, fname in enumerate(self.fnames):
+            if self.t_start[idx] != 0:
+                continue
+            if idx in points:
+                log.info(
+                    f"Running frames s{self.sector} c{self.camera} ccd{self.ccd} {np.where(points == idx)[0][0] * 10}%"
+                )
+                if idx != 0:
+                    self.save(package_jitter_comps=False)
+            with fits.open(fname, lazy_load_hdus=True) as hdu:
+                if not np.all(
+                    [
+                        self.sector == int(fname.split("-s")[1].split("-")[0]),
+                        self.camera == hdu[1].header["camera"],
+                        self.ccd == hdu[1].header["ccd"],
+                    ]
+                ):
+                    raise ValueError(
+                        f"FFI image is not part of Sector {self.sector}, Camera {self.camera}, CCD {self.ccd}"
+                    )
+                self.t_start[idx] = hdu[0].header["TSTART"]
+            data = (
+                fitsio.read(fname)[: self.cutout_size, 45 : self.cutout_size + 45]
+                - self.average_image
+            )
             (
-                self.t_start[idx],
                 self.poly_w[idx, :],
                 self.spline_w[idx, :],
                 self.strap_w[idx, :],
-                self.jitter_pix[idx, :],
-            ) = self._fit_frame(fname)
-        # Smaller version of jitter for use later
+                self.jitter[idx, :],
+            ) = self._fit_frame(data)
+        self.save()
+        # # Smaller version of jitter for use later
+        # bad = sigma_clip(np.gradient(self.jitter_pix, axis=1).std(axis=1), sigma=5).mask
+        # _, med, std = sigma_clipped_stats(self.jitter_pix[~bad], axis=0)
+        # j = (np.copy(self.jitter_pix) - med) / std
+        # j[j > 10] = 0
+        # U, s, V = pca(j[~bad], 20, n_iter=100)
+        # X = np.zeros((self.jitter_pix.shape[0], U.shape[1]))
+        # X[~bad] = np.copy(U)
+        # self.jitter = X
+        # self.jitter = np.copy(self.jitter_pix)
 
-        bad = sigma_clip(np.gradient(self.jitter_pix, axis=1).std(axis=1), sigma=5).mask
-        _, med, std = sigma_clipped_stats(self.jitter_pix[~bad], axis=0)
-        j = (np.copy(self.jitter_pix) - med) / std
-        j[j > 10] = 0
-        U, s, V = pca(j[~bad], 20, n_iter=100)
-        X = np.zeros((self.jitter_pix.shape[0], U.shape[1]))
-        X[~bad] = np.copy(U)
-        self.jitter = X
-
-    def _fit_frame(self, fname):
+    def _fit_frame(self, data):
         """Helper function to fit a model to an individual frame."""
-        with fits.open(fname, lazy_load_hdus=True) as hdu:
-            if not np.all(
-                [
-                    self.sector == int(fname.split("-s")[1].split("-")[0]),
-                    self.camera == hdu[1].header["camera"],
-                    self.ccd == hdu[1].header["ccd"],
-                ]
-            ):
-                raise ValueError(
-                    f"FFI image is not part of Sector {self.sector}, Camera {self.camera}, CCD {self.ccd}"
-                )
-
-        # NOTE COLUMN NEEDS +45 EVENTUALLY
-        data = fitsio.read(fname)[:2048, 45 : 2048 + 45]
-        # data = hdu[1].data[:2048, 45 : 2048 + 45]
-        t_start = hdu[0].header["TSTART"]
 
         avg = np.sum(
             [
@@ -312,12 +560,34 @@ class BackDrop(object):
             axis=0,
         )
 
-        avg /= self.weights
+        # I don't care about dividing by zero here
+        with np.errstate(divide="ignore", invalid="ignore"):
+            avg /= self.weights
         B = self._poly_X_down[self.weights.ravel() != 0].T.dot(
             avg.ravel()[self.weights.ravel() != 0]
         )
+        B += self._poly_prior_mu / self._poly_prior_sigma ** 2
+
         poly_w = np.linalg.solve(self.poly_sigma_w_inv, B)
-        res = data - self._poly_X.dot(poly_w).reshape((2048, 2048))
+
+        # iterate once
+        for count in [0, 1]:
+            m = self._poly_X_down.dot(poly_w).reshape(
+                (self.cutout_size // self.nb, self.cutout_size // self.nb)
+            )
+
+            k = np.abs(avg - m) < 300
+            k = (self.weights.ravel() != 0) & k.ravel()
+            poly_sigma_w_inv = self._poly_X_down[k].T.dot(self._poly_X_down[k])
+            poly_sigma_w_inv += np.diag(1 / self._poly_prior_sigma ** 2)
+            B = self._poly_X_down[k].T.dot(avg.ravel()[k])
+            B += self._poly_prior_mu / self._poly_prior_sigma ** 2
+            poly_w = np.linalg.solve(poly_sigma_w_inv, B)
+
+        res = data - self._poly_X.dot(poly_w).reshape(
+            (self.cutout_size, self.cutout_size)
+        )
+        res[(np.hypot(*np.gradient(np.abs(res))) > 30) | (np.abs(res) > 500)] *= 0
 
         # The spline and strap components should be small
         # sigma_w_inv = self.XT[:, star_mask.ravel()].dot(
@@ -334,8 +604,7 @@ class BackDrop(object):
         jitter_pix = res[self.jitter_mask]
 
         return (
-            t_start,
-            poly_w.reshape((self.npoly, self.npoly)),
+            poly_w,  # .reshape((self.npoly, self.npoly)),
             spline_w,
             strap_w,
             jitter_pix,
@@ -347,7 +616,7 @@ class BackDrop(object):
 
         raise NotImplementedError
 
-    def save(self):
+    def save(self, output=None, package_jitter_comps=True):
         """
         Save a model fit to the tess-backrop data directory.
 
@@ -356,33 +625,44 @@ class BackDrop(object):
             - T_START: The time array for each background solution
             - KNOTS: Knot spacing in row and column
             - SPLINE_W: Solution to the spline model. Has shape (ntimes x nknots x nknots)
-            - STRAP_W: Solution to the strap model. Has shape (ntimes x 2048)
+            - STRAP_W: Solution to the strap model. Has shape (ntimes x self.cutout_size)
             - POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
-        if not hasattr(self, "star_mask"):
-            raise ValueError(
-                "It does not look like you have regenerated a tess_backdrop model, I do not think you want to save."
-            )
+        log.info(f"Saving s{self.sector} c{self.camera} ccd{self.ccd}")
+        # if not hasattr(self, "star_mask"):
+        #     raise ValueError(
+        #         "It does not look like you have regenerated a tess_backdrop model, I do not think you want to save."
+        #     )
         hdu0 = fits.PrimaryHDU()
+        s = np.argsort(self.t_start)
         cols = [
             fits.Column(
-                name="T_START", format="D", unit="BJD - 2457000", array=self.t_start
-            ),
+                name="T_START", format="D", unit="BJD - 2457000", array=self.t_start[s]
+            )
         ]
+        if hasattr(self, "quality"):
+            cols.append(
+                fits.Column(
+                    name="QUALITY",
+                    format="D",
+                    unit="BJD - 2457000",
+                    array=self.quality[s],
+                )
+            )
         hdu1 = fits.BinTableHDU.from_columns(cols)
         cols = [
             fits.Column(name="KNOTS", format="D", unit="PIX", array=self.knots_wbounds)
         ]
         hdu2 = fits.BinTableHDU.from_columns(cols)
-        hdu3 = fits.ImageHDU(self.spline_w, name="spline_w")
-        hdu4 = fits.ImageHDU(self.strap_w, name="strap_w")
-        hdu5 = fits.ImageHDU(self.poly_w, name="poly_w")
+        hdu3 = fits.ImageHDU(self.spline_w[s], name="spline_w")
+        hdu4 = fits.ImageHDU(self.strap_w[s], name="strap_w")
+        hdu5 = fits.ImageHDU(self.poly_w[s], name="poly_w")
         hdul = fits.HDUList([hdu0, hdu1, hdu2, hdu3, hdu4, hdu5])
         hdul[0].header["ORIGIN"] = "tess-backdrop"
         hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
         hdul[0].header["VERSION"] = __version__
 
-        for key in ["sector", "camera", "ccd", "nknots", "npoly", "degree"]:
+        for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
             hdul[0].header[key] = getattr(self, key)
 
         fname = (
@@ -394,18 +674,62 @@ class BackDrop(object):
         hdul.writeto(dir + fname, overwrite=True)
 
         hdu0 = fits.PrimaryHDU()
-        hdu1 = fits.ImageHDU(self.jitter, name="jitter_pix")
+        hdu1 = fits.ImageHDU(self.jitter[s], name="jitter_pix")
         hdul = fits.HDUList([hdu0, hdu1])
         hdul[0].header["ORIGIN"] = "tess-backdrop"
         hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
         hdul[0].header["VERSION"] = __version__
-        for key in ["sector", "camera", "ccd", "nknots", "npoly", "degree"]:
+        for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
             hdul[0].header[key] = getattr(self, key)
-        fname = f"tessbackdrop_jitter_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+        if output is None:
+            fname = f"tessbackdrop_jitter_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+            dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+            hdul.writeto(dir + fname, overwrite=True)
+        else:
+            hdul.writeto(output, overwrite=True)
+        if package_jitter_comps:
+            self._package_jitter_comps()
+            if self.jitter_comps is not None:
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(self.jitter_comps[s], name="jitter_pix")
+                hdul = fits.HDUList([hdu0, hdu1])
+                hdul[0].header["ORIGIN"] = "tess-backdrop"
+                hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
+                hdul[0].header["VERSION"] = __version__
+                for key in [
+                    "sector",
+                    "camera",
+                    "ccd",
+                    "nknots",
+                    "npoly",
+                    "nrad",
+                    "degree",
+                ]:
+                    hdul[0].header[key] = getattr(self, key)
+                if output is None:
+                    fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+                    dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+                    hdul.writeto(dir + fname, overwrite=True)
+                else:
+                    hdul.writeto(output, overwrite=True)
+
+        hdu0 = fits.PrimaryHDU()
+        hdu1 = fits.ImageHDU(self.star_mask.astype(int), name="STARMASK")
+        hdu2 = fits.ImageHDU(self.sat_mask.astype(int), name="SATMASK")
+        hdu3 = fits.ImageHDU(self.average_image, name="AVGIMG")
+        hdul = fits.HDUList([hdu0, hdu1, hdu2, hdu3])
+
+        hdul[0].header["ORIGIN"] = "tess-backdrop"
+        hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
+        hdul[0].header["VERSION"] = __version__
+
+        for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
+            hdul[0].header[key] = getattr(self, key)
+        fname = f"tessbackdrop_masks_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
         dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
         hdul.writeto(dir + fname, overwrite=True)
 
-    def load(self, sector, camera, ccd):
+    def load(self, sector, camera, ccd, full_jitter=False):
         """
         Load a model fit to the tess-backrop data directory.
 
@@ -425,17 +749,34 @@ class BackDrop(object):
             )
         fname = f"tessbackdrop_sector{sector}_camera{camera}_ccd{ccd}.fits"
         with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
-            for key in ["sector", "camera", "ccd", "nknots", "npoly", "degree"]:
+            for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
                 setattr(self, key, hdu[0].header[key])
             self.t_start = hdu[1].data["T_START"]
+            if "QUALITY" in hdu[1].data.names:
+                self.quality = hdu[1].data["QUALITY"]
             self.knots_wbounds = hdu[2].data["KNOTS"]
             self.spline_w = hdu[3].data
             self.strap_w = hdu[4].data
             self.poly_w = hdu[5].data
 
-        fname = f"tessbackdrop_jitter_sector{sector}_camera{camera}_ccd{ccd}.fits"
-        with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
-            self.jitter = hdu[1].data
+        if full_jitter:
+            fname = f"tessbackdrop_jitter_sector{sector}_camera{camera}_ccd{ccd}.fits"
+            with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
+                self.jitter = hdu[1].data
+        fname = f"tessbackdrop_jitter_components_sector{sector}_camera{camera}_ccd{ccd}.fits"
+        if os.path.isfile(dir + fname):
+            with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
+                self.jitter_comps = hdu[1].data
+        fname = f"tessbackdrop_masks_sector{sector}_camera{camera}_ccd{ccd}.fits"
+        if os.path.isfile(dir + fname):
+            with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
+                self.star_mask = hdu[1].data
+                self.sat_mask = hdu[2].data
+                self.average_image = hdu[3].data
+        if self.ccd in [1, 3]:
+            self.bore_pixel = [2048, 2048]
+        elif self.ccd in [2, 4]:
+            self.bore_pixel = [2048, 0]
 
     def list_available(self):
         """List the sectors, cameras and CCDs that
@@ -507,8 +848,7 @@ class BackDrop(object):
                 )
 
         c, r = np.meshgrid(column, row)
-        c, r = c / 2048 - 0.5, r / 2048 - 0.5
-
+        c, r = c / self.cutout_size - 0.5, r / self.cutout_size - 0.5
         self._poly_X = np.asarray(
             [
                 c.ravel() ** idx * r.ravel() ** jdx
@@ -516,6 +856,18 @@ class BackDrop(object):
                 for jdx in np.arange(self.npoly)
             ]
         ).T
+
+        c, r = np.meshgrid(column, row)
+        c, r = (c - self.bore_pixel[1]) / 2048, (r - self.bore_pixel[1]) / 2048
+        crav = c.ravel()
+        rrav = r.ravel()
+        rad = (crav ** 2 + rrav ** 2)[:, None] ** 0.5
+
+        self._poly_X = np.hstack(
+            [self._poly_X, np.hstack([rad ** idx for idx in np.arange(1, self.nrad)])]
+        )
+
+        del c, r, crav, rrav
         self._spline_X = self._get_spline_matrix(column, row)
         bkg = np.zeros((len(tdxs), len(row), len(column)))
         for idx, tdx in enumerate(tdxs):
@@ -576,6 +928,69 @@ class BackDrop(object):
             times=tdxs,
         )
         return tpf - bkg
+
+    def _package_jitter_comps(self):
+        """Helper function for packaging up jitter components into different
+        time scale components.
+        """
+        # We'll hard code the number of PCA components for now
+        if self.jitter.shape[0] < 40:
+            self.jitter_comps = None
+            return
+        if self.jitter.shape[1] < 50:
+            self.jitter_comps = self.jitter.copy()
+            return
+        npca_components = 30
+        box = np.ones(20) / 20
+
+        X = []
+        breaks = (
+            np.where(np.diff(self.t_start) > np.median(np.diff(self.t_start) * 10))[0]
+            + 1
+        )
+        breaks = np.hstack([0, breaks, len(self.t_start)])
+        for x1, x2 in zip(breaks[:-1], breaks[1:]):
+            jitter = self.jitter[x1:x2].copy()
+            jitter -= np.median(jitter, axis=0)
+
+            jitter_smooth = np.zeros(jitter.shape)
+            for idx in range(jitter.shape[1]):
+                y = jitter[:, idx].copy()
+                jitter_smooth[:, idx] = np.convolve(y, box, mode="same")
+
+            mask = sigma_clip(jitter - jitter_smooth).mask
+            jitter[mask] = 0
+            for idx in range(jitter.shape[1]):
+                y = jitter[:, idx].copy()
+                jitter_smooth[:, idx] = np.convolve(y, box, mode="same")
+
+            box = np.ones(60) / 60
+            jitter_smooth2 = np.zeros(jitter.shape)
+            for idx in range(jitter.shape[1]):
+                y = jitter_smooth[:, idx].copy()
+                jitter_smooth2[:, idx] = np.convolve(y, box, mode="same")
+
+            short = (
+                self.jitter[x1:x2].copy()
+                - np.median(self.jitter[x1:x2], axis=0)
+                - jitter_smooth
+            )
+            medium = jitter_smooth - jitter_smooth2
+            long = jitter_smooth2
+
+            X1 = np.hstack(
+                [
+                    pca(short, npca_components, n_iter=10)[0],
+                    pca(medium, npca_components, n_iter=10)[0],
+                    pca(long, npca_components, n_iter=10)[0],
+                ]
+            )
+            X1 = np.hstack(
+                [X1[:, idx::npca_components] for idx in range(npca_components)]
+            )
+            X.append(X1)
+
+        self.jitter_comps = np.vstack(X)
 
 
 def _get_knots(x, nknots, degree):
@@ -653,7 +1068,7 @@ def _find_saturation_column_centers(mask):
     return centers, radii
 
 
-def get_saturation_mask(data, whisker_width=40):
+def get_saturation_mask(data, whisker_width=40, cutout_size=2048):
     """
     Finds a mask that will remove saturated pixels, and any "whiskers".
 
@@ -670,15 +1085,15 @@ def get_saturation_mask(data, whisker_width=40):
     sat_cols = (np.abs(np.gradient(data)[1]) > 1e4) | (data > 1e5)
 
     centers, radii = _find_saturation_column_centers(sat_cols)
-    whisker_mask = np.zeros((2048, 2048), bool)
+    whisker_mask = np.zeros((cutout_size, cutout_size), bool)
     for idx in np.arange(-2, 2):
         for jdx in np.arange(-whisker_width // 2, whisker_width // 2):
 
             a1 = np.max([np.zeros(len(centers)), centers[:, 1] - idx], axis=0)
-            a1 = np.min([np.ones(len(centers)) * 2047, a1], axis=0)
+            a1 = np.min([np.ones(len(centers)) * cutout_size - 1, a1], axis=0)
 
             b1 = np.max([np.zeros(len(centers)), centers[:, 0] - jdx], axis=0)
-            b1 = np.min([np.ones(len(centers)) * 2047, b1], axis=0)
+            b1 = np.min([np.ones(len(centers)) * cutout_size - 1, b1], axis=0)
 
             whisker_mask[a1.astype(int), b1.astype(int)] = True
 
@@ -688,7 +1103,7 @@ def get_saturation_mask(data, whisker_width=40):
         sat_mask |= np.gradient(sat_mask.astype(float), axis=1) != 0
     sat_mask |= whisker_mask
 
-    X, Y = np.mgrid[:2048, :2048]
+    X, Y = np.mgrid[:cutout_size, :cutout_size]
 
     jdx = 0
     kdx = 0
@@ -736,3 +1151,48 @@ def _std_iter(x, mask, sigma=3, n_iters=3):
         std = np.std(x[~m])
         m |= np.abs(x) > (std * sigma)
     return std
+
+
+def _find_bad_frames(fnames, cutout_size=2048, corner_check=False):
+    """Identifies frames that probably have a lot of scattered lightkurve
+    If quality flags are available, will use TESS quality flags.
+
+    If unavailable, or if `corner_check=True`, loads the 30x30 pixel corner
+    region of every frame, and uses them to find frames that have a lot of
+    scattered light.
+
+
+    """
+
+    quality = np.zeros(len(fnames), int)
+    warned = False
+
+    log.info("Extracting quality")
+    for idx, fname in enumerate(fnames):
+        try:
+            quality[idx] = fitsio.read_header(fname, 1)["DQUALITY"]
+        except KeyError:
+            if warned is False:
+                log.warning("Quality flags are missing.")
+                warned = True
+            continue
+    bad = (quality & (2048 | 175)) != 0
+
+    if warned | corner_check:
+        log.info("Using corner check")
+        corner = np.zeros((4, len(fnames)))
+        for tdx, fname in enumerate(fnames):
+            corner[0, tdx] = fitsio.read(fname)[:30, 45 : 45 + 30].mean()
+            corner[1, tdx] = fitsio.read(fname)[-30:, 45 : 45 + 30].mean()
+            corner[2, tdx] = fitsio.read(fname)[
+                :30, 45 + cutout_size - 30 : 45 + cutout_size
+            ].mean()
+            corner[3, tdx] = fitsio.read(fname)[
+                -30:, 45 + cutout_size - 30 - 1 : 45 + cutout_size
+            ].mean()
+
+        c = corner.T - np.median(corner, axis=1)
+        c /= np.std(c, axis=0)
+        bad = (np.abs(c) > 2).any(axis=1)
+        #    bad |= corner.std(axis=0) > 200
+    return bad, quality

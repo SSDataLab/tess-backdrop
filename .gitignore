@@ -1,6 +1,10 @@
 sandbox
 __pycache__
 site
-*.fits
 dist/
 .gitignore
+src/tess_backdrop/data
+dist
+pleiades
+.DS_Store
+.ipynb_checkpoints

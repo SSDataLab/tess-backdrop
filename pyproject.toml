@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tess-backdrop"
-version = "0.1.0"
+version = "0.1.6"
 description = ""
 authors = ["Christina Hedges <christina.l.hedges@nasa.com>"]
 exclude = ["src/tess_backdrop/data/sector*"]
