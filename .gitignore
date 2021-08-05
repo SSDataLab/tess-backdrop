@@ -1,3 +1,6 @@
 sandbox
 __pycache__
 site
+*.fits
+dist/
+.gitignore

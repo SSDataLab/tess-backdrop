@@ -2,7 +2,8 @@
 name = "tess-backdrop"
 version = "0.1.0"
 description = ""
-authors = ["Your Name <you@example.com>"]
+authors = ["Christina Hedges <christina.l.hedges@nasa.com>"]
+exclude = ["src/tess_backdrop/data/sector*"]
 
 [tool.poetry.dependencies]
 python = ">=3.8,<3.10"
