@@ -113,7 +113,7 @@ class TESSCutCorrector(lk.RegressionCorrector):
         )
 
         # Scattered Light DM
-        bkg = self.b.build_correction(
+        bkg = self.b.build_model(
             np.arange(self.tpf.shape[2]) + self.tpf.column,
             np.arange(self.tpf.shape[1]) + self.tpf.row,
         )

@@ -13,6 +13,7 @@ from astropy.stats import sigma_clip
 
 from . import PACKAGEDIR
 from .version import __version__
+from .utils import find_bad_frames, get_saturation_mask, get_knots
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class BackDrop(object):
     def __init__(
         self,
         fnames=None,
-        npoly=5,
+        npoly=3,
         nrad=5,
         nknots=40,
         degree=2,
@@ -94,7 +95,7 @@ class BackDrop(object):
             self.fnames = np.sort(self.fnames)
             if len(self.fnames) >= 15:
                 log.info("Finding bad frames")
-                self.bad_frames, self.quality = _find_bad_frames(
+                self.bad_frames, self.quality = find_bad_frames(
                     self.fnames, cutout_size=self.cutout_size
                 )
             else:
@@ -117,7 +118,7 @@ class BackDrop(object):
 
         else:
             self.bad_frames = None
-        self.knots_wbounds = _get_knots(
+        self.knots_wbounds = get_knots(
             np.arange(self.cutout_size), nknots=nknots, degree=degree
         )
 
@@ -322,7 +323,7 @@ class BackDrop(object):
         c, r = (column - self.bore_pixel[1]) / 2048, (row - self.bore_pixel[0]) / 2048
         crav = c.ravel()
         rrav = r.ravel()
-        rad = (crav ** 2 + rrav ** 2)[:, None] ** 0.5
+        rad = ((crav ** 2 + rrav ** 2)[:, None] ** 0.5) / np.sqrt(2)
 
         self._poly_X = np.hstack(
             [self._poly_X, np.hstack([rad ** idx for idx in np.arange(1, self.nrad)])]
@@ -387,7 +388,8 @@ class BackDrop(object):
         c, r = (column - self.bore_pixel[1]) / 2048, (row - self.bore_pixel[0]) / 2048
         crav = c.ravel()
         rrav = r.ravel()
-        rad = (crav ** 2 + rrav ** 2)[:, None] ** 0.5
+        rad = ((crav ** 2 + rrav ** 2)[:, None] ** 0.5) / np.sqrt(2)
+
         self._poly_X_down = np.hstack(
             [
                 self._poly_X_down,
@@ -477,7 +479,9 @@ class BackDrop(object):
             )
         return "BackDrop"
 
-    def fit_model(self):
+    def fit_model(
+        self, save=True, ouput_dir=None, verwrite=True, package_jitter_comps=True
+    ):
         """Fit the tess-backdrop model to the files specified by `fnames`."""
         if not hasattr(self, "star_mask"):
             _ = self._build_mask()
@@ -512,7 +516,12 @@ class BackDrop(object):
                     f"Running frames s{self.sector} c{self.camera} ccd{self.ccd} {np.where(points == idx)[0][0] * 10}%"
                 )
                 if idx != 0:
-                    self.save(package_jitter_comps=False)
+                    if save:
+                        self.save(
+                            output_dir=output_dir,
+                            package_jitter_comps=package_jitter_comps,
+                            overwrite=overwrite,
+                        )
             with fits.open(fname, lazy_load_hdus=True) as hdu:
                 if not np.all(
                     [
@@ -535,7 +544,12 @@ class BackDrop(object):
                 self.strap_w[idx, :],
                 self.jitter[idx, :],
             ) = self._fit_frame(data)
-        self.save()
+        if save:
+            self.save(
+                output_dir=output_dir,
+                overwrite=overwrite,
+                package_jitter_comps=package_jitter_comps,
+            )
         # # Smaller version of jitter for use later
         # bad = sigma_clip(np.gradient(self.jitter_pix, axis=1).std(axis=1), sigma=5).mask
         # _, med, std = sigma_clipped_stats(self.jitter_pix[~bad], axis=0)
@@ -610,14 +624,21 @@ class BackDrop(object):
             jitter_pix,
         )
 
-    def _get_jitter(self, data):
-        """Get the jitter correction somehow..."""
-        # Use jitter mask.
+    def _package_jitter_hdulist(self, package_jitter_comps):
+        """Put the jitter components in a fits format"""
+        s = np.argsort(self.t_start)
+        hdu0 = self.hdu0
+        if package_jitter_comps:
+            self._package_jitter_comps()
+            hdu1 = fits.ImageHDU(self.jitter_comps[s], name="jitter_pix")
 
-        raise NotImplementedError
+        else:
+            hdu1 = fits.ImageHDU(self.jitter[s], name="jitter_pix")
+        hdul = fits.HDUList([hdu0, hdu1])
+        return hdul
 
-    def save(self, output_dir=None, package_jitter_comps=True):
-        """
+    def _package_weights_hdulist(self):
+        """Put the masks into a fits format
         Save a model fit to the tess-backrop data directory.
 
         Will create a fits file containing the following extensions
@@ -628,12 +649,7 @@ class BackDrop(object):
             - STRAP_W: Solution to the strap model. Has shape (ntimes x self.cutout_size)
             - POLY_W: Solution to the polynomial model. Has shape (ntimes x npoly x npoly)
         """
-        log.info(f"Saving s{self.sector} c{self.camera} ccd{self.ccd}")
-        # if not hasattr(self, "star_mask"):
-        #     raise ValueError(
-        #         "It does not look like you have regenerated a tess_backdrop model, I do not think you want to save."
-        #     )
-        hdu0 = fits.PrimaryHDU()
+        hdu0 = self.hdu0
         s = np.argsort(self.t_start)
         cols = [
             fits.Column(
@@ -658,82 +674,45 @@ class BackDrop(object):
         hdu4 = fits.ImageHDU(self.strap_w[s], name="strap_w")
         hdu5 = fits.ImageHDU(self.poly_w[s], name="poly_w")
         hdul = fits.HDUList([hdu0, hdu1, hdu2, hdu3, hdu4, hdu5])
-        hdul[0].header["ORIGIN"] = "tess-backdrop"
-        hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
-        hdul[0].header["VERSION"] = __version__
+        return hdul
 
-        for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
-            hdul[0].header[key] = getattr(self, key)
-
-        fname = (
-            f"tessbackdrop_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
-        )
-        if output_dir is None:
-            dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
-            if not os.path.isdir(dir):
-                os.makedirs(dir)
-            hdul.writeto(dir + fname, overwrite=True)
-        else:
-            hdul.writeto(output_dir + fname, overwrite=True)
-
-        hdu0 = fits.PrimaryHDU()
-        hdu1 = fits.ImageHDU(self.jitter[s], name="jitter_pix")
-        hdul = fits.HDUList([hdu0, hdu1])
-        hdul[0].header["ORIGIN"] = "tess-backdrop"
-        hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
-        hdul[0].header["VERSION"] = __version__
-        for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
-            hdul[0].header[key] = getattr(self, key)
-        fname = f"tessbackdrop_jitter_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
-        if output_dir is None:
-            dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
-            hdul.writeto(dir + fname, overwrite=True)
-        else:
-            hdul.writeto(output_dir + fname, overwrite=True)
-        if package_jitter_comps:
-            self._package_jitter_comps()
-            if self.jitter_comps is not None:
-                hdu0 = fits.PrimaryHDU()
-                hdu1 = fits.ImageHDU(self.jitter_comps[s], name="jitter_pix")
-                hdul = fits.HDUList([hdu0, hdu1])
-                hdul[0].header["ORIGIN"] = "tess-backdrop"
-                hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
-                hdul[0].header["VERSION"] = __version__
-                for key in [
-                    "sector",
-                    "camera",
-                    "ccd",
-                    "nknots",
-                    "npoly",
-                    "nrad",
-                    "degree",
-                ]:
-                    hdul[0].header[key] = getattr(self, key)
-                fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
-                if output_dir is None:
-                    dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
-                    hdul.writeto(dir + fname, overwrite=True)
-                else:
-                    hdul.writeto(output_dir + fname, overwrite=True)
-
-        hdu0 = fits.PrimaryHDU()
+    def _package_mask_hdulist(self):
+        """Pacakge masks in a fits file"""
+        hdu0 = self.hdu0
         hdu1 = fits.ImageHDU(self.star_mask.astype(int), name="STARMASK")
         hdu2 = fits.ImageHDU(self.sat_mask.astype(int), name="SATMASK")
         hdu3 = fits.ImageHDU(self.average_image, name="AVGIMG")
         hdul = fits.HDUList([hdu0, hdu1, hdu2, hdu3])
+        return hdul
 
-        hdul[0].header["ORIGIN"] = "tess-backdrop"
-        hdul[0].header["AUTHOR"] = "christina.l.hedges@nasa.gov"
-        hdul[0].header["VERSION"] = __version__
-
+    def save(self, output_dir=None, package_jitter_comps=True, overwrite=False):
+        """Save fits files to `output_dir`"""
+        self.hdu0 = fits.PrimaryHDU()
+        self.hdu0.header["ORIGIN"] = "tess-backdrop"
+        self.hdu0.header["AUTHOR"] = "christina.l.hedges@nasa.gov"
+        self.hdu0.header["VERSION"] = __version__
         for key in ["sector", "camera", "ccd", "nknots", "npoly", "nrad", "degree"]:
-            hdul[0].header[key] = getattr(self, key)
-        fname = f"tessbackdrop_masks_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+            self.hdu0.header[key] = getattr(self, key)
+
         if output_dir is None:
-            dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
-            hdul.writeto(dir + fname, overwrite=True)
-        else:
-            hdul.writeto(output_dir + fname, overwrite=True)
+            output_dir = f"{PACKAGEDIR}/data/sector{self.sector:03}/camera{self.camera:02}/ccd{self.ccd:02}/"
+            if not os.path.isdir(output_dir):
+                os.makedirs(output_dir)
+
+        log.info(f"Saving s{self.sector} c{self.camera} ccd{self.ccd}")
+        hdul = self._package_weights_hdulist()
+        fname = (
+            f"tessbackdrop_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+        )
+        hdul.writeto(output_dir + fname, overwrite=overwrite)
+
+        hdul = self._package_mask_hdulist()
+        fname = f"tessbackdrop_masks_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+        hdul.writeto(output_dir + fname, overwrite=overwrite)
+
+        hdul = self._package_jitter_hdulist(package_jitter_comps)
+        fname = f"tessbackdrop_jitter_components_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
+        hdul.writeto(output_dir + fname, overwrite=overwrite)
 
     def load(self, sector, camera, ccd, full_jitter=False):
         """
@@ -806,7 +785,7 @@ class BackDrop(object):
                         idx += 1
         return df
 
-    def build_correction(self, column, row, times=None):
+    def build_model(self, column, row, times=None, poly_only=False):
         """Build a background correction for a given column, row and time array.
 
         Parameters
@@ -821,7 +800,8 @@ class BackDrop(object):
             Times to evaluate the background model at. If none, will evaluate at all
             the times for available FFIs. If array of ints, will use those indexes to the original FFIs.
             Otherwise, must be an np.ndarray of floats for the T_START time of the FFI.
-
+        poly_only: bool
+            Whether to return just the polynomial terms, (i.e. no splines, no straps)
         Returns
         -------
         bkg : np.ndarray
@@ -867,19 +847,23 @@ class BackDrop(object):
         c, r = (c - self.bore_pixel[1]) / 2048, (r - self.bore_pixel[1]) / 2048
         crav = c.ravel()
         rrav = r.ravel()
-        rad = (crav ** 2 + rrav ** 2)[:, None] ** 0.5
+        rad = ((crav ** 2 + rrav ** 2)[:, None] ** 0.5) / np.sqrt(2)
 
         self._poly_X = np.hstack(
             [self._poly_X, np.hstack([rad ** idx for idx in np.arange(1, self.nrad)])]
         )
 
         del c, r, crav, rrav
-        self._spline_X = self._get_spline_matrix(column, row)
+        if not poly_only:
+            self._spline_X = self._get_spline_matrix(column, row)
         bkg = np.zeros((len(tdxs), len(row), len(column)))
         for idx, tdx in enumerate(tdxs):
             poly = self._poly_X.dot(self.poly_w[tdx].ravel()).reshape(
                 (row.shape[0], column.shape[0])
             )
+            if poly_only:
+                bkg[idx, :, :] = poly
+                continue
             spline = self._spline_X.dot(self.spline_w[tdx].ravel()).reshape(
                 (row.shape[0], column.shape[0])
             )
@@ -928,7 +912,7 @@ class BackDrop(object):
             if (np.min(np.abs((self.t_start - t) + exptime)) < exptime)
         ]
 
-        bkg = self.build_correction(
+        bkg = self.build_model(
             np.arange(tpf.shape[2]) + tpf.column,
             np.arange(tpf.shape[1]) + tpf.row,
             times=tdxs,
@@ -997,208 +981,3 @@ class BackDrop(object):
             X.append(X1)
 
         self.jitter_comps = np.vstack(X)
-
-
-def _get_knots(x, nknots, degree):
-    """Find the b-spline knot spacing for an input array x, number of knots and degree
-
-    Parameters
-    ----------
-    x : np.ndarray
-        In put vector to create b-spline for
-    nknots : int
-        Number of knots to use in the b-spline
-    degree : int
-        Degree of the b-spline
-
-    Returns
-    -------
-    knots_wbounds : np.ndarray
-        The knot locations for the input x.
-    """
-
-    knots = np.asarray(
-        [s[-1] for s in np.array_split(np.argsort(x), nknots - degree)[:-1]]
-    )
-    knots = [np.mean([x[k], x[k + 1]]) for k in knots]
-    knots = np.append(np.append(x.min(), knots), x.max())
-    knots = np.unique(knots)
-    knots_wbounds = np.append(
-        np.append([x.min()] * (degree - 1), knots), [x.max()] * (degree)
-    )
-    return knots_wbounds
-
-
-def _find_saturation_column_centers(mask):
-    """
-    Finds the center point of saturation columns.
-
-    Parameters
-    ----------
-    mask : np.ndarray of bools
-        Mask where True indicates a pixel is saturated
-
-    Returns
-    -------
-    centers : np.ndarray
-        Array of the centers in XY space for all the bleed columns
-    """
-    centers = []
-    radii = []
-    idxs = np.where(mask.any(axis=0))[0]
-    for idx in idxs:
-        line = mask[:, idx]
-        seq = []
-        val = line[0]
-        jdx = 0
-
-        while jdx <= len(line):
-            while line[jdx] == val:
-                jdx += 1
-                if jdx >= len(line):
-                    break
-
-            if jdx >= len(line):
-                break
-            seq.append(jdx)
-            val = line[jdx]
-        w = np.array_split(line, seq)
-        v = np.array_split(np.arange(len(line)), seq)
-        coords = [(idx, v1.mean().astype(int)) for v1, w1 in zip(v, w) if w1.all()]
-        rads = [len(v1) / 2 for v1, w1 in zip(v, w) if w1.all()]
-        for coord, rad in zip(coords, rads):
-            centers.append(coord)
-            radii.append(rad)
-    centers = np.asarray(centers)
-    radii = np.asarray(radii)
-    return centers, radii
-
-
-def get_saturation_mask(data, whisker_width=40, cutout_size=2048):
-    """
-    Finds a mask that will remove saturated pixels, and any "whiskers".
-
-    Parameters
-    ----------
-    data : np.ndarray of shape (2048 x 2048)
-        Input TESS FFI
-
-    Returns
-    -------
-    sat_mask: np.ndarray of bools
-        The mask for saturated pixels. False where pixels are saturated.
-    """
-    sat_cols = (np.abs(np.gradient(data)[1]) > 1e4) | (data > 1e5)
-
-    centers, radii = _find_saturation_column_centers(sat_cols)
-    whisker_mask = np.zeros((cutout_size, cutout_size), bool)
-    for idx in np.arange(-2, 2):
-        for jdx in np.arange(-whisker_width // 2, whisker_width // 2):
-
-            a1 = np.max([np.zeros(len(centers)), centers[:, 1] - idx], axis=0)
-            a1 = np.min([np.ones(len(centers)) * cutout_size - 1, a1], axis=0)
-
-            b1 = np.max([np.zeros(len(centers)), centers[:, 0] - jdx], axis=0)
-            b1 = np.min([np.ones(len(centers)) * cutout_size - 1, b1], axis=0)
-
-            whisker_mask[a1.astype(int), b1.astype(int)] = True
-
-    sat_mask = np.copy(sat_cols)
-    sat_mask |= np.gradient(sat_mask.astype(float), axis=0) != 0
-    for count in range(4):
-        sat_mask |= np.gradient(sat_mask.astype(float), axis=1) != 0
-    sat_mask |= whisker_mask
-
-    X, Y = np.mgrid[:cutout_size, :cutout_size]
-
-    jdx = 0
-    kdx = 0
-    for jdx in range(8):
-        for kdx in range(8):
-            k = (
-                (centers[:, 1] > jdx * 256 - radii.max() - 1)
-                & (centers[:, 1] <= (jdx + 1) * 256 + radii.max() + 1)
-                & (centers[:, 0] > kdx * 256 - radii.max() - 1)
-                & (centers[:, 0] <= (kdx + 1) * 256 + radii.max() + 1)
-            )
-            if not (k).any():
-                continue
-            for idx in np.where(k)[0]:
-                x, y = (
-                    X[jdx * 256 : (jdx + 1) * 256, kdx * 256 : (kdx + 1) * 256]
-                    - centers[idx][1],
-                    Y[jdx * 256 : (jdx + 1) * 256, kdx * 256 : (kdx + 1) * 256]
-                    - centers[idx][0],
-                )
-                sat_mask[
-                    jdx * 256 : (jdx + 1) * 256, kdx * 256 : (kdx + 1) * 256
-                ] |= np.hypot(x, y) < (np.min([radii[idx], 70]))
-
-    # for idx in tqdm(range(len(centers)), desc="Building Saturation Mask"):
-    #     sat_mask |= np.hypot(X - centers[idx][1], Y - centers[idx][0]) < (radii[idx])
-    return ~sat_mask
-
-
-def _std_iter(x, mask, sigma=3, n_iters=3):
-    """Iteratively finds the standard deviation of an array after sigma clipping
-    Parameters
-    ----------
-    x : np.ndarray
-        Array with average of zero
-    mask : np.ndarray of bool
-        Mask of same size as x, where True indicates a point to be masked.
-    sigma : int or float
-        The standard deviation at which to clip
-    n_iters : int
-        Number of iterations
-    """
-    m = mask.copy()
-    for iter in range(n_iters):
-        std = np.std(x[~m])
-        m |= np.abs(x) > (std * sigma)
-    return std
-
-
-def _find_bad_frames(fnames, cutout_size=2048, corner_check=False):
-    """Identifies frames that probably have a lot of scattered lightkurve
-    If quality flags are available, will use TESS quality flags.
-
-    If unavailable, or if `corner_check=True`, loads the 30x30 pixel corner
-    region of every frame, and uses them to find frames that have a lot of
-    scattered light.
-
-
-    """
-
-    quality = np.zeros(len(fnames), int)
-    warned = False
-
-    log.info("Extracting quality")
-    for idx, fname in enumerate(fnames):
-        try:
-            quality[idx] = fitsio.read_header(fname, 1)["DQUALITY"]
-        except KeyError:
-            if warned is False:
-                log.warning("Quality flags are missing.")
-                warned = True
-            continue
-    bad = (quality & (2048 | 175)) != 0
-
-    if warned | corner_check:
-        log.info("Using corner check")
-        corner = np.zeros((4, len(fnames)))
-        for tdx, fname in enumerate(fnames):
-            corner[0, tdx] = fitsio.read(fname)[:30, 45 : 45 + 30].mean()
-            corner[1, tdx] = fitsio.read(fname)[-30:, 45 : 45 + 30].mean()
-            corner[2, tdx] = fitsio.read(fname)[
-                :30, 45 + cutout_size - 30 : 45 + cutout_size
-            ].mean()
-            corner[3, tdx] = fitsio.read(fname)[
-                -30:, 45 + cutout_size - 30 - 1 : 45 + cutout_size
-            ].mean()
-
-        c = corner.T - np.median(corner, axis=1)
-        c /= np.std(c, axis=0)
-        bad = (np.abs(c) > 2).any(axis=1)
-        #    bad |= corner.std(axis=0) > 200
-    return bad, quality

@@ -17,6 +17,8 @@ lightkurve = "^2.0.9"
 fitsio = "^1.1.4"
 mkdocs-jupyter = "^0.17.3"
 fbpca = "^1.0"
+psfmachine = "^1.0.0"
+jedi = "0.17.2"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"

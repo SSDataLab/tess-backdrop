@@ -29,21 +29,21 @@ def test_load():
     assert b.camera == 1
     assert b.ccd == 3
 
-    corr = b.build_correction(np.arange(100, 110), np.arange(200, 210), 0)
+    corr = b.build_model(np.arange(100, 110), np.arange(200, 210), 0)
     assert len(corr.shape) == 3
     assert corr.shape == (1, 10, 10)
 
-    corr = b.build_correction(np.arange(100, 101), np.arange(200, 201))
+    corr = b.build_model(np.arange(100, 101), np.arange(200, 201))
     assert len(corr.shape) == 3
     assert corr.shape == (1282, 1, 1)
 
 
 def test_build():
-
     fnames = [
         "/".join(PACKAGEDIR.split("/")[:-2])
         + "/tests/data/tess2018206192942-s0001-1-4-0120-s_ffic.fits"
     ]
     cutout_size = 128
     b = tbd.BackDrop(np.hstack([fnames, fnames]), cutout_size=cutout_size, nknots=5)
-    b.fit_model()
+    b.fit_model(save=False)
+    b.fit_model(save=True, package_jitter_comps=False)

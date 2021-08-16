@@ -4,7 +4,6 @@
     handler: python
     selection:
       members:
-        - Back
         - load
         - build_correction
         - fit_model
