@@ -65,6 +65,12 @@ class SimpleBackDrop(object):
         self.sat_mask = get_saturation_mask(
             fitsio.read(self.fnames[self.test_frame])[:2048, 45 : 45 + 2048]
         ).astype(float)
+        ar = np.zeros((2048 // self.nb, 2048 // self.nb, self.nb, self.nb))
+        for idx in range(self.nb):
+            for jdx in range(self.nb):
+                ar[:, :, idx, jdx] = self.sat_mask[idx :: self.nb, jdx :: self.nb]
+        self.sat_mask = ar.sum(axis=(2, 3)) >= self.nb
+
         if self.ccd in [1, 3]:
             self.bore_pixel = [2048, 2048]
         elif self.ccd in [2, 4]:
@@ -100,7 +106,7 @@ class SimpleBackDrop(object):
             [
                 np.round(self.column.min()),
                 np.linspace(
-                    np.round(self.column.min()), np.round(self.column.max()), 28
+                    np.round(self.column.min()), np.round(self.column.max()), 18
                 ),
                 np.round(self.column.max()),
                 np.round(self.column.max()),
@@ -109,7 +115,7 @@ class SimpleBackDrop(object):
         self.row_knots = np.hstack(
             [
                 np.round(self.row.min()),
-                np.linspace(np.round(self.row.min()), np.round(self.row.max()), 28),
+                np.linspace(np.round(self.row.min()), np.round(self.row.max()), 18),
                 np.round(self.row.max()),
                 np.round(self.row.max()),
             ]
@@ -182,7 +188,9 @@ class SimpleBackDrop(object):
         """Get the flux at a particular time index"""
         if self.fnames is None:
             return np.zeros(self.shape[1:])
-        return _flux(self.fnames[tdx], [self.nb if nb is None else nb][0])
+        return _flux(
+            self.fnames[tdx], [self.nb if nb is None else nb][0]
+        )  # / self.sat_mask
 
     def fit_frame(self, tdx, store=False):
         if not hasattr(self, "A"):
