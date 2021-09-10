@@ -55,27 +55,28 @@ def animate(data, scale="linear", output="out.mp4", **kwargs):
     anim.save(output, dpi=150)
 
 
-def get_spline_matrix(x1, knots1, x2=None, knots2=None, degree=2):
-    """Helper function to make a 2D spline matrix in a fairly memory efficient way."""
-    if x1 is None:
-        x2 = x1
-        knots2 = knots1
-
-    def _X(x, knots, degree):
-        matrices = [
-            csr_matrix(_spline_basis_vector(x, degree, idx, knots))
-            for idx in np.arange(-1, len(knots) - degree - 1)
-        ]
-        X = vstack(matrices, format="csr").T
-        return X
-
-    X1 = _X(x1, knots1, degree)
-    X2 = _X(x2, knots2, degree)
-    X1f = hstack([X1 for idx in range(X2.shape[1])]).tocsr()
-    X2f = vstack([X2 for idx in range(X1.shape[1])])
-    X2f = X2f.reshape(X1f.shape).tocsr()
-    Xf = X1f.multiply(X2f)
-    return Xf
+#
+# def get_spline_matrix(x1, knots1, x2=None, knots2=None, degree=2):
+#     """Helper function to make a 2D spline matrix in a fairly memory efficient way."""
+#     if x1 is None:
+#         x2 = x1
+#         knots2 = knots1
+#
+#     def _X(x, knots, degree):
+#         matrices = [
+#             csr_matrix(_spline_basis_vector(x, degree, idx, knots))
+#             for idx in np.arange(-1, len(knots) - degree - 1)
+#         ]
+#         X = vstack(matrices, format="csr").T
+#         return X
+#
+#     X1 = _X(x1, knots1, degree)
+#     X2 = _X(x2, knots2, degree)
+#     X1f = hstack([X1 for idx in range(X2.shape[1])]).tocsr()
+#     X2f = vstack([X2 for idx in range(X1.shape[1])])
+#     X2f = X2f.reshape(X1f.shape).tocsr()
+#     Xf = X1f.multiply(X2f)
+#     return Xf
 
 
 def get_knots(x, nknots, degree):
@@ -281,3 +282,32 @@ def find_bad_frames(fnames, cutout_size=2048, corner_check=False):
         bad = (np.abs(c) > 2).any(axis=1)
         #    bad |= corner.std(axis=0) > 200
     return bad, quality
+
+
+def get_spline_matrix(xc, xr=None, degree=2, nknots=20):
+    """Helper function to make a 2D spline matrix in a fairly memory efficient way."""
+
+    def _X(x, degree, knots):
+        matrices = [
+            csr_matrix(_spline_basis_vector(x, degree, idx, knots))
+            for idx in np.arange(-1, len(knots) - degree - 1)
+        ]
+        X = vstack(matrices, format="csr").T
+        return X
+
+    xc_knots = get_knots(xc, nknots=nknots, degree=degree)
+    if xr is None:
+        xr = xc
+        xr_knots = xc_knots
+    else:
+        xr_knots = get_knots(xr, nknots=nknots, degree=degree)
+    Xc = _X(xc, degree, xc_knots)
+    Xcf = vstack([Xc for idx in range(len(xr))]).tocsr()
+    Xr = _X(xr, degree, xr_knots)
+    Xrf = (
+        hstack([Xr for idx in range(len(xc))])
+        .reshape((Xcf.shape[0], Xc.shape[1]))
+        .tocsr()
+    )
+    Xf = hstack([Xrf.multiply(X.T) for X in Xcf.T]).tocsr()
+    return Xf

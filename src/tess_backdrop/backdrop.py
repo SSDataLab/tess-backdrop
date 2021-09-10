@@ -480,7 +480,7 @@ class BackDrop(object):
         return "BackDrop"
 
     def fit_model(
-        self, save=True, ouput_dir=None, verwrite=True, package_jitter_comps=True
+        self, save=True, output_dir=None, overwrite=True, package_jitter_comps=True
     ):
         """Fit the tess-backdrop model to the files specified by `fnames`."""
         if not hasattr(self, "star_mask"):
