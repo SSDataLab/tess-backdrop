@@ -11,3 +11,4 @@ from .backdrop import BackDrop  # noqa
 from .tesscutcorrector import TESSCutCorrector  # noqa
 from .version import __version__  # noqa
 from .simple import SimpleBackDrop  # noqa
+from .full import FullBackDrop  # noqa

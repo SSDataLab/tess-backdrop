@@ -43,10 +43,14 @@ class SimpleBackDrop(object):
     npoly: int = 6  # Polynomial order for cartesian
     sector: Optional = None  # Sector (otherwise will scrape from file names)
     test_frame: Optional = None  # Reference frame
+    cutout_size: int = 2048  # Size to cut out for faster run time (testing only)
+    njitter: int = 5000  # Number of jitter components
 
     def __post_init__(self):
         if not (np.log2(self.nb) % 1) == 0:
             raise ValueError("Number of bins must be e.g 4, 8, 16, 32")
+        if not (np.log2(self.cutout_size) % 1) == 0:
+            raise ValueError("`cutout_size`, must be e.g. 2048, 1024, 512, 256 etc")
         if (self.fnames is not None) & np.any(
             [not hasattr(self, attr) for attr in ["t_start", "camera", "ccd", "sector"]]
         ):
@@ -82,12 +86,6 @@ class SimpleBackDrop(object):
             s = np.argsort(self.t_start)
             self.fnames = np.asarray(self.fnames)[s]
             self.t_start = self.t_start[s]
-            self.sat_mask = (
-                get_saturation_mask(
-                    fitsio.read(self.fnames[self.test_frame])[:2048, 45 : 45 + 2048]
-                )
-            ).astype(float)
-            self.sat_mask[self.sat_mask == 0] = np.nan
 
         if hasattr(self, "ccd"):
             if self.ccd in [1, 3]:
@@ -95,22 +93,34 @@ class SimpleBackDrop(object):
             elif self.ccd in [2, 4]:
                 self.bore_pixel = [2048, 0]
             self.row, self.column = (
-                np.mgrid[: 2048 // self.nb, : 2048 // self.nb] * self.nb
+                np.mgrid[: self.cutout_size // self.nb, : self.cutout_size // self.nb]
+                * self.nb
             )
             self.column, self.row = (self.column - self.bore_pixel[1]) / (2048), (
                 self.row - self.bore_pixel[0]
             ) / (2048)
             self.rad = np.hypot(self.column, self.row) / np.sqrt(2)
             self.phi = np.arctan2(self.row, self.column)
-            self.phi_knots = np.hstack(
-                [
-                    self.phi.min(),
-                    self.phi.min(),
-                    np.linspace(self.phi.min(), self.phi.max(), 8),
-                    self.phi.max(),
-                    self.phi.max(),
-                ]
-            )
+            if self.ccd in [2, 4]:
+                self.phi_knots = np.pi * np.hstack(
+                    [
+                        -0.5,
+                        -0.5,
+                        np.linspace(-0.5, 0, 8),
+                        0,
+                        0,
+                    ]
+                )
+            if self.ccd in [1, 3]:
+                self.phi_knots = np.pi * np.hstack(
+                    [
+                        -1,
+                        -1,
+                        np.linspace(-1, 0.5, 8),
+                        -0.5,
+                        -0.5,
+                    ]
+                )
             self.r_knots = np.hstack(
                 [
                     0,
@@ -131,21 +141,10 @@ class SimpleBackDrop(object):
             s1 = len(self.t_start)
         else:
             raise ValueError("Unknown shape?")
-        return (s1, 2048 // self.nb, 2048 // self.nb)
+        return (s1, self.cutout_size // self.nb, self.cutout_size // self.nb)
 
     def _simple_design_matrix(self):
         """Creates the design matrix of splines, based on `self.r_knots` and `self.phi_knots`"""
-        # This is hard coded for now
-        degree = 2
-        #
-        def _X(x, knots, degree):
-            matrices = [
-                csr_matrix(_spline_basis_vector(x, degree, idx, knots))
-                for idx in np.arange(-1, len(knots) - degree - 1)
-            ]
-            X = vstack(matrices, format="csr").T
-            return X
-
         X1 = _X(self.rad.ravel(), self.r_knots, 2)
         X2 = _X(self.phi.ravel(), self.phi_knots, 2)
 
@@ -168,19 +167,19 @@ class SimpleBackDrop(object):
         ).tocsr()
         return A
 
-    def _build_design_matrix(self):
+    def _build_simple_design_matrix(self):
         """Builds the design matrix for use"""
         A = self._simple_design_matrix()
-        self.prior_mu = np.zeros(A.shape[1]) + 2
-        self.prior_sigma = np.ones(A.shape[1]) * 100
-        self.design_matrix = A
+        self.simple_prior_mu = np.zeros(A.shape[1]) + 2
+        self.simple_prior_sigma = np.ones(A.shape[1]) * 100
+        self.simple_design_matrix = A
 
     @property
     def A(self):
         """Design matrix, this property helps us write some math"""
-        if not hasattr(self, "design_matrix"):
-            self._build_design_matrix()
-        return self.design_matrix
+        if not hasattr(self, "simple_design_matrix"):
+            self._build_simple_design_matrix()
+        return self.simple_design_matrix
 
     def __repr__(self):
         try:
@@ -200,7 +199,14 @@ class SimpleBackDrop(object):
         if not hasattr(self, "star_mask"):
             self.star_mask = (
                 np.hypot(
-                    *np.gradient(np.nan_to_num(_flux(self.fnames[self.test_frame])))
+                    *np.gradient(
+                        np.nan_to_num(
+                            _flux(
+                                self.fnames[self.test_frame],
+                                cutout_size=self.cutout_size,
+                            )
+                        )
+                    )
                 )
                 > 30
             )
@@ -209,19 +215,38 @@ class SimpleBackDrop(object):
             self.star_mask[:, :-1] |= self.star_mask[:, 1:]
             self.star_mask[:, 1:] |= self.star_mask[:, :-1]
             self.star_mask = (~self.star_mask).astype(float)
+            self.star_mask[self.star_mask == 0] = np.nan
+
+        if not hasattr(self, "sat_mask"):
+            self.sat_mask = (
+                get_saturation_mask(
+                    fitsio.read(self.fnames[self.test_frame])[
+                        : self.cutout_size, 45 : 45 + self.cutout_size
+                    ],
+                    cutout_size=self.cutout_size,
+                )
+            ).astype(float)
+            self.sat_mask[self.sat_mask == 0] = np.nan
+
+        if not hasattr(self, "jitter_mask"):
+            l1, l2 = np.where(~np.isfinite(self.star_mask) & np.isfinite(self.sat_mask))
+            s = np.random.choice(len(l1), size=self.njitter, replace=False)
+            l1, l2 = l1[s], l2[s]
+            self.jitter_mask = np.zeros((self.cutout_size, self.cutout_size), bool)
+            self.jitter_mask[l1, l2] = True
+
         return _bin_down(
-            _flux(self.fnames[tdx]) * self.sat_mask * self.star_mask,
+            _flux(self.fnames[tdx], cutout_size=self.cutout_size)
+            * self.sat_mask
+            * self.star_mask,
             [self.nb if nb is None else nb][0],
+            cutout_size=self.cutout_size,
         )
 
     def fit_frame(self, tdx, store=False):
         """Fit an individual frame of the stack."""
-        return self._fit_frame(tdx, store=store)
-
-    def _fit_frame(self, tdx, store=False):
-        """This is a hidden function so parent classes can use and augment it"""
         if not hasattr(self, "A"):
-            self._build_design_matrix()
+            self._build_simple_design_matrix()
         if store:
             self.weights = np.isfinite(self.flux(tdx))
             self.weights &= self.flux(tdx) > 10
@@ -230,11 +255,11 @@ class SimpleBackDrop(object):
             self.sigma_w_inv = self.A.T.dot(
                 self.A.multiply(1 / self.weights.ravel()[:, None] ** 2)
             ).toarray()
-            self.sigma_w_inv += np.diag(1 / self.prior_sigma ** 2)
+            self.sigma_w_inv += np.diag(1 / self.simple_prior_sigma ** 2)
         f = np.nan_to_num(np.log10(self.flux(tdx)))
         B = (
             self.A.T.dot((f / self.weights ** 2).ravel())
-            + self.prior_mu / self.prior_sigma ** 2
+            + self.simple_prior_mu / self.simple_prior_sigma ** 2
         )
         w = np.linalg.solve(self.sigma_w_inv, B)
         if store:
@@ -243,15 +268,11 @@ class SimpleBackDrop(object):
             self.sigma_w_inv = self.A.T.dot(
                 self.A.multiply(1 / self.weights.ravel()[:, None] ** 2)
             ).toarray()
-            self.sigma_w_inv += np.diag(1 / self.prior_sigma ** 2)
+            self.sigma_w_inv += np.diag(1 / self.simple_prior_sigma ** 2)
         return w
 
     def fit_model(self, test_frame=None):
         """Fit the backdrop model to the image stack"""
-        return self._fit_model(test_frame=test_frame)
-
-    def _fit_model(self, test_frame=None):
-        """We use a test frame to build and store the inverse covariance matrix to make the rest of the steps faster!"""
         if test_frame is None:
             test_frame = self.test_frame
         _ = self.fit_frame(test_frame, store=True)
@@ -264,10 +285,10 @@ class SimpleBackDrop(object):
         if not hasattr(self, "w"):
             raise ValueError("Please fit the model with `fit_model` first")
         if not self.A.shape[0] == np.product(self.shape[1:]):
-            self._build_design_matrix()
+            self._build_simple_design_matrix()
         if not self.A.shape[0] == np.product(self.shape[1:]):
             self.__post_init__()
-            self._build_design_matrix()
+            self._build_simple_design_matrix()
         return 10 ** self.A.dot(self.w[tdx]).reshape(self.shape[1:])
 
     def _package_weights_hdulist(self):
@@ -295,7 +316,7 @@ class SimpleBackDrop(object):
             fits.Column(name="PHI_KNOTS", format="D", unit="PIX", array=self.phi_knots)
         ]
         hdu3 = fits.BinTableHDU.from_columns(cols, name="PHI_KNOTS")
-        hdu4 = fits.ImageHDU(self.w[s], name="weights")
+        hdu4 = fits.ImageHDU(self.w[s], name="simple_weights")
         hdul = fits.HDUList([hdu0, hdu1, hdu2, hdu3, hdu4])
         return hdul
 
@@ -307,7 +328,7 @@ class SimpleBackDrop(object):
             - TIME: The time array for each background solution
             - R_KNOTS: Knot spacing in radial dimension
             - PHI_KNOTS: Knot spacing in phi dimension
-            - W: Weights for the model.
+            - SIMPLE_WEIGHTS: Weights for the model.
         """
         if not hasattr(self, "w"):
             raise ValueError("Please fit the model with `fit_model` first")
@@ -315,7 +336,16 @@ class SimpleBackDrop(object):
         self.hdu0.header["ORIGIN"] = "tess-backdrop"
         self.hdu0.header["AUTHOR"] = "christina.l.hedges@nasa.gov"
         self.hdu0.header["VERSION"] = __version__
-        for key in ["sector", "camera", "ccd", "nb", "npoly"]:
+        for key in [
+            "sector",
+            "camera",
+            "ccd",
+            "nb",
+            "npoly",
+            "njitter",
+            "test_frame",
+            "cutout_size",
+        ]:
             self.hdu0.header[key] = getattr(self, key)
 
         if output_dir is None:
@@ -328,28 +358,44 @@ class SimpleBackDrop(object):
         fname = f"tessbackdrop_simple_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
         hdul.writeto(output_dir + fname, overwrite=overwrite)
 
-    def load(self, sector, camera, ccd, nb=1, dir=None):
+    def load(self, input, nb=1, dir=None):
         """
         Load a model fit to the tess-backrop data directory.
 
         Parameters
         ----------
-        sector: int
-            TESS sector number
-        camera: int
-            TESS camera number
-        ccd: int
-            TESS CCD number
+        input: tuple or string
+            Either pass a tuple with `(sector, camera, ccd)` or pass
+            a file name in `dir` to load
         """
+        if isinstance(input, tuple):
+            if len(input) == 3:
+                sector, camera, ccd = input
+                fname = (
+                    f"tessbackdrop_simple_sector{sector}_camera{camera}_ccd{ccd}.fits"
+                )
+            else:
+                raise ValueError("Please pass tuple as `(sector, camera, ccd)`")
+        elif isinstance(input, str):
+            fname = input
+        else:
+            raise ValueError("Can not parse input")
         if dir is None:
             dir = f"{PACKAGEDIR}/data/sector{sector:03}/camera{camera:02}/ccd{ccd:02}/"
         if not os.path.isdir(dir):
-            raise ValueError(
-                f"No solutions exist for Sector {sector}, Camera {camera}, CCD {ccd}."
-            )
-        fname = f"tessbackdrop_simple_sector{sector}_camera{camera}_ccd{ccd}.fits"
+            raise ValueError(f"No solutions exist")
+
         with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
-            for key in ["sector", "camera", "ccd", "nb", "npoly"]:
+            for key in [
+                "sector",
+                "camera",
+                "ccd",
+                "nb",
+                "npoly",
+                "njitter",
+                "test_frame",
+                "cutout_size",
+            ]:
                 setattr(self, key, hdu[0].header[key])
             self.t_start = hdu[1].data["T_START"]
             if "QUALITY" in hdu[1].data.names:
@@ -359,7 +405,7 @@ class SimpleBackDrop(object):
             self.w = hdu[4].data
         self.__post_init__()
 
-    def build_model(self, column, row, times=None, poly_only=False):
+    def build_model(self, column, row, times=None):
         """Build a background correction for a given column, row and time array.
 
         Parameters
@@ -374,8 +420,6 @@ class SimpleBackDrop(object):
             Times to evaluate the background model at. If none, will evaluate at all
             the times for available FFIs. If array of ints, will use those indexes to the original FFIs.
             Otherwise, must be an np.ndarray of floats for the T_START time of the FFI.
-        poly_only: bool
-            Whether to return just the polynomial terms, (i.e. no splines, no straps)
         Returns
         -------
         bkg : np.ndarray
@@ -411,7 +455,7 @@ class SimpleBackDrop(object):
         ) / (2048)
         self.rad = np.hypot(self.column, self.row) / np.sqrt(2)
         self.phi = np.arctan2(self.row, self.column)
-        self._build_design_matrix()
+        self._build_simple_design_matrix()
         bkg = np.zeros((len(tdxs), *self.row.shape))
         for idx, tdx in enumerate(tdxs):
             bkg[idx, :, :] = 10 ** self.A.dot(self.w[tdx]).reshape(self.row.shape)
@@ -443,14 +487,13 @@ class SimpleBackDrop(object):
             raise ValueError("tess_backdrop can only correct TESS TPFs.")
 
         if np.any([not hasattr(self, attr) for attr in ["camera", "ccd", "sector"]]):
-            self.load(sector=tpf.sector, camera=tpf.camera, ccd=tpf.ccd)
-        else:
-            if (
-                (self.sector != tpf.sector)
-                | (self.camera != tpf.camera)
-                | (self.ccd != tpf.ccd)
-            ):
-                self.load(sector=tpf.sector, camera=tpf.camera, ccd=tpf.ccd)
+            self.load((tpf.sector, tpf.camera, tpf.ccd))
+        elif (
+            (self.sector != tpf.sector)
+            | (self.camera != tpf.camera)
+            | (self.ccd != tpf.ccd)
+        ):
+            self.load((tpf.sector, tpf.camera, tpf.ccd))
 
         tdxs = [
             np.argmin(np.abs((self.t_start - t) + exptime))
@@ -465,22 +508,28 @@ class SimpleBackDrop(object):
         )
         return tpf - bkg
 
-    def plot(self, frame=0):
+    def plot(self, frame=0, vmin=None, vmax=None):
         """Plots a given frame of the data, model and residuals"""
         with plt.style.context("seaborn-white"):
             f = self.flux(frame)
             if np.nansum(f) == 0:
                 fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True, sharey=True)
-                v = np.nanpercentile(self.model(frame), [1, 99])
+                if vmin is None:
+                    vmin = np.nanpercentile(self.model(frame), 1)
+                if vmax is None:
+                    vmax = np.nanpercentile(self.model(frame), 99)
                 ax = [ax]
             else:
                 fig, ax = plt.subplots(1, 3, figsize=(20, 6), sharex=True, sharey=True)
-                v = np.nanpercentile(f, [1, 99])
-            ax[0].imshow(self.model(frame), vmin=v[0], vmax=v[1], cmap="Greys_r")
+                if vmin is None:
+                    vmin = np.nanpercentile(f, 1)
+                if vmax is None:
+                    vmax = np.nanpercentile(f, 99)
+            ax[0].imshow(self.model(frame), vmin=vmin, vmax=vmax, cmap="Greys_r")
             ax[0].set(xlabel="Column", ylabel="Row", title="Model")
             if np.nansum(f) == 0:
                 return ax[0]
-            ax[1].imshow(f, vmin=v[0], vmax=v[1], cmap="Greys_r")
+            ax[1].imshow(f, vmin=vmin, vmax=vmax, cmap="Greys_r")
             ax[1].set(xlabel="Column", title="Data")
             if np.nansum(f) != 0:
                 ax[2].imshow(
@@ -496,7 +545,7 @@ class SimpleBackDrop(object):
         with plt.style.context("seaborn-white"):
             fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True, sharey=True)
             ax = [ax]
-            f = _flux(self.fnames[self.test_frame])
+            f = _flux(self.fnames[self.test_frame], cutout_size=self.cutout_size)
             im = ax[0].imshow(
                 f,
                 vmin=np.nanpercentile(f, 10),
@@ -510,20 +559,29 @@ class SimpleBackDrop(object):
 
 
 @lru_cache(maxsize=16)
-def _flux(fname, limit=100):
+def _flux(fname, cutout_size=2048, limit=100):
     """Let's us cache some frames in memory"""
-    f = fitsio.read(fname)[:2048, 45 : 45 + 2048]
+    f = fitsio.read(fname)[:cutout_size, 45 : 45 + cutout_size]
     f[f < limit] = np.nan
     return f
 
 
-def _bin_down(flux, nb, func=np.nanmin, limit=100):
+def _bin_down(flux, nb, cutout_size=2048, func=np.nanmin, limit=100):
     """Bins the flux down to a resolution of 2048/`nb` and takes the `func`"""
     if nb == 1:
         return flux
-    ar = np.zeros((2048 // nb, 2048 // nb, nb, nb))
+    ar = np.zeros((cutout_size // nb, cutout_size // nb, nb, nb))
     for idx in range(nb):
         for jdx in range(nb):
             ar[:, :, idx, jdx] = flux[idx::nb, jdx::nb]
     ar[ar <= 0] = np.nan
     return func(ar, axis=(2, 3))
+
+
+def _X(x, knots, degree):
+    matrices = [
+        csr_matrix(_spline_basis_vector(x, degree, idx, knots))
+        for idx in np.arange(-1, len(knots) - degree - 1)
+    ]
+    X = vstack(matrices, format="csr").T
+    return X
