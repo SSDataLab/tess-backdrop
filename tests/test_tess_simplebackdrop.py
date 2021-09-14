@@ -1,10 +1,10 @@
-import numpy as np
-
 import os
+
+import numpy as np
 import pytest
+
 import tess_backdrop as tbd
-from tess_backdrop import PACKAGEDIR
-from tess_backdrop import __version__
+from tess_backdrop import PACKAGEDIR, __version__
 
 
 def test_build():

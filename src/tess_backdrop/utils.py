@@ -1,11 +1,11 @@
 import logging
-import fitsio
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib import animation
-from lightkurve.correctors.designmatrix import _spline_basis_vector
-from scipy.sparse import csr_matrix, hstack, lil_matrix, vstack
 
+import fitsio
+import matplotlib.pyplot as plt
+import numpy as np
+from lightkurve.correctors.designmatrix import _spline_basis_vector
+from matplotlib import animation
+from scipy.sparse import csr_matrix, hstack, lil_matrix, vstack
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +169,8 @@ def get_saturation_mask(data, whisker_width=40, cutout_size=2048):
         The mask for saturated pixels. False where pixels are saturated.
     """
     sat_cols = (np.abs(np.gradient(data)[1]) > 1e4) | (data > 1e5)
+    if not sat_cols.any():
+        return ~sat_cols
 
     centers, radii = find_saturation_column_centers(sat_cols)
     whisker_mask = np.zeros((cutout_size, cutout_size), bool)

@@ -5,15 +5,14 @@ import fitsio
 import numpy as np
 import pandas as pd
 from astropy.io import fits
+from astropy.stats import sigma_clip
+from fbpca import pca
 from lightkurve.correctors.designmatrix import _spline_basis_vector
 from scipy.sparse import csr_matrix, hstack, lil_matrix, vstack
-from fbpca import pca
-from astropy.stats import sigma_clip
-
 
 from . import PACKAGEDIR
+from .utils import find_bad_frames, get_knots, get_saturation_mask
 from .version import __version__
-from .utils import find_bad_frames, get_saturation_mask, get_knots
 
 log = logging.getLogger(__name__)
 

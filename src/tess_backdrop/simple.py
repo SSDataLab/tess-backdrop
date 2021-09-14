@@ -1,23 +1,22 @@
 """Simple version of a Backdrop """
-import numpy as np
-import lightkurve as lk
-from scipy.sparse import csr_matrix, vstack, hstack
-from lightkurve.correctors.designmatrix import _spline_basis_vector
-from astropy.io import fits
-import matplotlib.pyplot as plt
-from dataclasses import dataclass
-from typing import Optional
-import fitsio
-from tqdm import tqdm
-from functools import lru_cache
-
-import os
-from . import PACKAGEDIR
-from .version import __version__
 import logging
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Optional
 
+import fitsio
+import lightkurve as lk
+import matplotlib.pyplot as plt
+import numpy as np
+from astropy.io import fits
+from lightkurve.correctors.designmatrix import _spline_basis_vector
+from scipy.sparse import csr_matrix, hstack, vstack
+from tqdm import tqdm
 
-from .utils import get_spline_matrix, get_knots, get_saturation_mask
+from . import PACKAGEDIR
+from .utils import get_knots, get_saturation_mask, get_spline_matrix
+from .version import __version__
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +34,11 @@ class SimpleBackDrop(object):
     makes it faster and cheaper to make the corrections. In each bin, we take the
     minimum pixel value, meaning that we're always attempting to fit the background
     and not the targets.
+
+    Parameters
+    ----------
+    fnames : Optional str
+        List of file names
 
     """
 
@@ -78,7 +82,19 @@ class SimpleBackDrop(object):
                         self.quality[tdx] = hdu[1].header["DQUALITY"]
         if (self.test_frame is None) and (self.fnames is not None):
             try:
-                self.test_frame = np.where(self.quality == 0)[0][0]
+                # Test frame is a low flux frame, close to the middle of the dataset.
+                f = np.asarray(
+                    [
+                        fitsio.read(fname)[
+                            np.min([self.bore_pixel[0], 2047]),
+                            45 + np.min([self.bore_pixel[1], 0]),
+                        ]
+                        for fname in tqdm(self.fnames)
+                    ]
+                )
+
+                l = np.where((f < np.nanpercentile(f, 5)) & (self.quality == 0))[0]
+                self.test_frame = l[np.argmin(np.abs(l - len(f) // 2))]
             except:
                 self.test_frame = self.shape[0] // 2
 
@@ -272,7 +288,13 @@ class SimpleBackDrop(object):
         return w
 
     def fit_model(self, test_frame=None):
-        """Fit the backdrop model to the image stack"""
+        """Fit the Backdrop model to the image stack in find_bad_frames
+
+        Parameters
+        ----------
+            test_frame : int
+                Optional frame to use as a test frame
+        """
         if test_frame is None:
             test_frame = self.test_frame
         _ = self.fit_frame(test_frame, store=True)
@@ -358,7 +380,7 @@ class SimpleBackDrop(object):
         fname = f"tessbackdrop_simple_sector{self.sector}_camera{self.camera}_ccd{self.ccd}.fits"
         hdul.writeto(output_dir + fname, overwrite=overwrite)
 
-    def load(self, input, nb=1, dir=None):
+    def load(self, input, dir=None):
         """
         Load a model fit to the tess-backrop data directory.
 
@@ -367,6 +389,12 @@ class SimpleBackDrop(object):
         input: tuple or string
             Either pass a tuple with `(sector, camera, ccd)` or pass
             a file name in `dir` to load
+        dir : str
+            Optional tring with the directory name
+
+        Returns
+        -------
+        self: `tess_backdrop.SimpleBackDrop` object
         """
         if isinstance(input, tuple):
             if len(input) == 3:
@@ -404,6 +432,7 @@ class SimpleBackDrop(object):
             self.phi_knots = hdu[3].data["PHI_KNOTS"]
             self.w = hdu[4].data
         self.__post_init__()
+        return self
 
     def build_model(self, column, row, times=None):
         """Build a background correction for a given column, row and time array.
@@ -542,6 +571,8 @@ class SimpleBackDrop(object):
         return ax
 
     def plot_test_frame(self):
+        if self.fnames is None:
+            raise ValueError("No file names to plot")
         with plt.style.context("seaborn-white"):
             fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True, sharey=True)
             ax = [ax]

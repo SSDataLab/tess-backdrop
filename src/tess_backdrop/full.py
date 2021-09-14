@@ -1,27 +1,31 @@
-import lightkurve as lk
+import logging
+import os
 from dataclasses import dataclass
 from glob import glob
-import numpy as np
-from scipy.sparse import hstack, vstack, lil_matrix, csr_matrix
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-from astropy.io import fits
-
-
-import os
-from .simple import SimpleBackDrop, _X, _flux
-from .version import __version__
-from . import PACKAGEDIR
 from typing import Optional
-from dataclasses import dataclass
 
-import logging
+import lightkurve as lk
+import matplotlib.pyplot as plt
+import numpy as np
+from astropy.io import fits
+from scipy.sparse import csr_matrix, hstack, lil_matrix, vstack
+from tqdm import tqdm
+
+from . import PACKAGEDIR
+from .simple import _X, SimpleBackDrop, _flux
+from .version import __version__
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class FullBackDrop(object):
+    """Class to create a more advanced version of a TESS BackDrop
+
+    FullBackDrop uses both a smooth polynomial (see SimpleBackDrop) and adds a model
+    for straps, and high spatial frequency noise using a basis spline.
+    """
+
     fnames: Optional = None  # List of file names
     nb: int = 8  # Number of bins to use to downsample images
     npoly: int = 6  # Polynomial order for cartesian
@@ -30,7 +34,7 @@ class FullBackDrop(object):
     sector: Optional = None  # Sector (otherwise will scrape from file names)
     test_frame: Optional = None  # Reference frame
     cutout_size: Optional = 2048
-    njitter: int = 5000  # Number of jitter components
+    njitter: int = 3000  # Number of jitter components
 
     def __post_init__(self):
         if not (np.log2(self.cutout_size) % 1) == 0:
@@ -46,6 +50,7 @@ class FullBackDrop(object):
         )
         self.sector = self._simplebackdrop.sector
         if hasattr(self._simplebackdrop, "test_frame"):
+            # Inherit from simple
             self.test_frame = self._simplebackdrop.test_frame
         if hasattr(self._simplebackdrop, "ccd"):
             self.column, self.row = (
@@ -158,7 +163,8 @@ class FullBackDrop(object):
 
     def _build_full_matrices(self):
         self._simplebackdrop.reshape(1)
-        self.simple_design_matrix = self._simplebackdrop._simple_design_matrix()
+        self._simplebackdrop._build_simple_design_matrix()
+        self.simple_design_matrix = self._simplebackdrop.simple_design_matrix
         self._simplebackdrop.reshape(self.nb)
 
         self._build_spline_design_matrix()
@@ -357,7 +363,13 @@ class FullBackDrop(object):
         hdu1 = fits.BinTableHDU.from_columns(cols, name="CART_KNOTS")
         hdu2 = fits.ImageHDU(self.spline_w, name="spline_weights")
         hdu3 = fits.ImageHDU(self.strap_w, name="strap_weights")
-        hdul = fits.HDUList([hdu1, hdu2, hdu3])
+        hdu4 = fits.ImageHDU(self.jitter, name="jitter")
+        hdu5 = fits.ImageHDU(
+            _flux(self.fnames[self.test_frame], cutout_size=self.cutout_size)
+            - self.model(self.test_frame),
+            name="test_frame",
+        )
+        hdul = fits.HDUList([hdu1, hdu2, hdu3, hdu4, hdu5])
         return hdul
 
     def save(self, output_dir=None, overwrite=False):
@@ -400,7 +412,7 @@ class FullBackDrop(object):
         )
         hdul.writeto(output_dir + fname, overwrite=overwrite)
 
-    def load(self, input, nb=1, dir=None):
+    def load(self, input, dir=None):
         """
         Load a model fit to the tess-backrop data directory.
 
@@ -424,7 +436,7 @@ class FullBackDrop(object):
             dir = f"{PACKAGEDIR}/data/sector{sector:03}/camera{camera:02}/ccd{ccd:02}/"
         if not os.path.isdir(dir):
             raise ValueError(f"No solutions exist")
-        self._simplebackdrop.load(fname, nb=1, dir=dir)
+        self._simplebackdrop.load(fname, dir=dir)
         with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
             for key in [
                 "nknots",
@@ -433,8 +445,10 @@ class FullBackDrop(object):
                 setattr(self, key, hdu[0].header[key])
             self.spline_w = hdu[6].data
             self.strap_w = hdu[7].data
+            self.jitter = hdu[8].data
         self.__post_init__()
-        self._simplebackdrop.load(fname, nb=1, dir=dir)
+        self._simplebackdrop.load(fname, dir=dir)
+        return self
 
     def correct_tpf(self, tpf, exptime=None):
         """Returns a TPF with the background corrected
