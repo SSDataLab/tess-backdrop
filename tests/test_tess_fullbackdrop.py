@@ -11,7 +11,10 @@ def test_build():
     for cutout_size in [256]:
         fnames = ["/".join(PACKAGEDIR.split("/")[:-2]) + "/tests/data/tempffi.fits"]
         b = tbd.FullBackDrop(
-            np.hstack([fnames, fnames]), sector=2, test_frame=0, cutout_size=cutout_size
+            np.hstack([fnames, fnames]),
+            sector=2,
+            test_frame_number=0,
+            cutout_size=cutout_size,
         )
         assert b.flux(0).shape == (cutout_size, cutout_size)
         assert b.sector == 2

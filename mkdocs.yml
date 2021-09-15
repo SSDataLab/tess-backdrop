@@ -5,7 +5,7 @@ nav:
     - DemoLightCurve: lightcurve-example.ipynb
     - DemoModel: fit-model-example.ipynb
     - SimpleBackDrop API Docs: simple.md
-    - BackDrop API Docs: backdrop.md
+    - FullBackDrop API Docs: full.md
     - Corrector API Docs: corrector.md
 
 

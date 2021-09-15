@@ -9,10 +9,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.io import fits
 from scipy.sparse import csr_matrix, hstack, lil_matrix, vstack
+from scipy.signal import medfilt
+from fbpca import pca
 from tqdm import tqdm
 
 from . import PACKAGEDIR
-from .simple import _X, SimpleBackDrop, _flux
+from .simple import SimpleBackDrop
+from .utils import _flux, _X, plot
 from .version import __version__
 
 log = logging.getLogger(__name__)
@@ -24,6 +27,11 @@ class FullBackDrop(object):
 
     FullBackDrop uses both a smooth polynomial (see SimpleBackDrop) and adds a model
     for straps, and high spatial frequency noise using a basis spline.
+
+    Note: This class does NOT directly subclass SimpleBackDrop. This is because
+    we use this class to first run SimpleBackDrop to get an estimate of the basic
+    background flux, and then apply additional corrections on top of it. Because of this we
+    cannot directly subclass, as we need to call a SimpleBackDrop object.
     """
 
     fnames: Optional = None  # List of file names
@@ -32,7 +40,7 @@ class FullBackDrop(object):
     nknots: int = 30  # Number of knots for spline
     degree: int = 2  # Spline degree
     sector: Optional = None  # Sector (otherwise will scrape from file names)
-    test_frame: Optional = None  # Reference frame
+    test_frame_number: Optional = None  # Reference frame
     cutout_size: Optional = 2048
     njitter: int = 3000  # Number of jitter components
 
@@ -41,17 +49,17 @@ class FullBackDrop(object):
             raise ValueError("`cutout_size`, must be e.g. 2048, 1024, 512, 256 etc")
         self._simplebackdrop = SimpleBackDrop(
             fnames=self.fnames,
-            nb=1,
+            nb=self.nb,
             npoly=self.npoly,
-            sector=self.sector,
-            test_frame=self.test_frame,
+            test_frame_number=self.test_frame_number,
             cutout_size=self.cutout_size,
             njitter=self.njitter,
+            sector=self.sector,
         )
         self.sector = self._simplebackdrop.sector
-        if hasattr(self._simplebackdrop, "test_frame"):
+        if hasattr(self._simplebackdrop, "test_frame_number"):
             # Inherit from simple
-            self.test_frame = self._simplebackdrop.test_frame
+            self.test_frame_number = self._simplebackdrop.test_frame_number
         if hasattr(self._simplebackdrop, "ccd"):
             self.column, self.row = (
                 np.arange(self.cutout_size) - self.bore_pixel[1]
@@ -161,12 +169,17 @@ class FullBackDrop(object):
         self.strap_prior_sigma = np.ones(self.cutout_size) * 300
         self.strap_design_matrix = self._strap_design_matrix()
 
-    def _build_full_matrices(self):
+    def _build_simple_design_matrix(self):
+        """Builds the simple design matrix"""
         self._simplebackdrop.reshape(1)
         self._simplebackdrop._build_simple_design_matrix()
         self.simple_design_matrix = self._simplebackdrop.simple_design_matrix
         self._simplebackdrop.reshape(self.nb)
+        self._simplebackdrop._build_simple_design_matrix()
 
+    def _build_full_matrices(self):
+        """Builds all design matrices"""
+        self._build_simple_design_matrix()
         self._build_spline_design_matrix()
         self._build_strap_design_matrix()
 
@@ -210,12 +223,12 @@ class FullBackDrop(object):
             jitter,
         )
 
-    def fit_model(self, test_frame=None):
+    def fit_model(self, test_frame_number=None):
         """Fit the backdrop model to the image stack"""
-        if test_frame is None:
-            test_frame = self.test_frame
+        if test_frame_number is None:
+            test_frame_number = self.test_frame_number
         self._build_full_matrices()
-        _ = self.fit_frame(test_frame, store=True)
+        _ = self.fit_frame(test_frame_number, store=True)
         self.spline_w = np.zeros((self.shape[0], self.spline_design_matrix.shape[1]))
         self.strap_w = np.zeros((self.shape[0], self.strap_design_matrix.shape[1]))
         self.jitter = np.zeros((self.shape[0], self.njitter))
@@ -229,8 +242,67 @@ class FullBackDrop(object):
                 self._simplebackdrop.w[tdx],
                 self.jitter[tdx],
             ) = self.fit_frame(tdx, store=False)
+        self._package_jitter()
+
+    def _package_jitter(self, npca_components=20):
+        """Packages the jitter terms into detrending vectors similar to CBVs.
+
+        Splits the jitter into timescales of:
+            - t < 0.5 days
+            - t > 0.5 days
+
+        Parameters
+        ----------
+        self: tess_backdrop.FullBackDrop
+            Input backdrop to package
+        npca_components : int
+            Number of pca components to compress into. Default 20, which will result
+            in an ntimes x 40 matrix.
+        Returns
+        -------
+        matrix : np.ndarray
+            The packaged jitter matrix will contains the top principle components
+            of the jitter matrix.
+        """
+
+        # If there aren't enough jitter components, just return them.
+        if self.jitter.shape[0] < 40:
+            # Not enough times
+            return None
+        if self.jitter.shape[1] < 50:
+            # Not enough pixels
+            return self.jitter.copy()
+
+        # We split at data downlinks where there is a gap of at least 0.2 days
+        breaks = np.where(np.diff(self.t_start) > 0.2)[0] + 1
+        breaks = np.hstack([0, breaks, len(self.t_start)])
+
+        jitter_short = self.jitter.copy()
+
+        nb = int(0.5 / np.median(np.diff(self.t_start)))
+        nb = [nb if (nb % 2) == 1 else nb + 1][0]
+        smooth = lambda x: np.asarray(
+            [medfilt(x[:, tdx], nb) for tdx in range(x.shape[1])]
+        )
+        jitter_medium = np.hstack(
+            [smooth(self.jitter[x1:x2]) for x1, x2 in zip(breaks[:-1], breaks[1:])]
+        ).T
+
+        U1, s, V = pca(jitter_short - jitter_medium, npca_components, n_iter=10)
+        U2, s, V = pca(jitter_medium, npca_components, n_iter=10)
+
+        X = np.hstack(
+            [
+                U1,
+                U2,
+            ]
+        )
+        X = np.hstack([X[:, idx::npca_components] for idx in range(npca_components)])
+        self.jitter = X
 
     def model_simple(self, tdx):
+        if not hasattr(self, "simple_design_matrix"):
+            self._build_simple_design_matrix()
         """Returns the simple model at a given time index"""
         return 10 ** self.simple_design_matrix.dot(self._simplebackdrop.w[tdx]).reshape(
             self.shape[1:]
@@ -238,6 +310,8 @@ class FullBackDrop(object):
 
     def model_spline(self, tdx):
         """Returns the spline model at a given time index"""
+        if not hasattr(self, "spline_design_matrix"):
+            self._build_spline_design_matrix()
         return self.spline_design_matrix.dot(self.spline_w[tdx]).reshape(
             (self.row.shape[0], self.column.shape[0])
         )
@@ -311,38 +385,10 @@ class FullBackDrop(object):
 
     def plot(self, frame=0, vmin=None, vmax=None):
         """Plots a given frame of the data, model and residuals"""
-        with plt.style.context("seaborn-white"):
-            f = self.flux(frame)
-            if not hasattr(self, "simple_design_matrix"):
-                self._build_full_matrices()
-            if np.nansum(f) == 0:
-                fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True, sharey=True)
-                if vmin is None:
-                    vmin = np.nanpercentile(self.model(frame), 1)
-                if vmax is None:
-                    vmax = np.nanpercentile(self.model(frame), 99)
-                ax = [ax]
-            else:
-                fig, ax = plt.subplots(1, 3, figsize=(20, 6), sharex=True, sharey=True)
-                if vmin is None:
-                    vmin = np.nanpercentile(f, 1)
-                if vmax is None:
-                    vmax = np.nanpercentile(f, 99)
-            ax[0].imshow(self.model(frame), vmin=vmin, vmax=vmax, cmap="Greys_r")
-            ax[0].set(xlabel="Column", ylabel="Row", title="Model")
-            if np.nansum(f) == 0:
-                return ax[0]
-            ax[1].imshow(f, vmin=vmin, vmax=vmax, cmap="Greys_r")
-            ax[1].set(xlabel="Column", title="Data")
-            if np.nansum(f) != 0:
-                ax[2].imshow(
-                    self.flux(frame) - self.model(frame),
-                    vmin=-10,
-                    vmax=10,
-                    cmap="coolwarm",
-                )
-                ax[2].set(xlabel="Column", title="Residuals")
-        return ax
+        if not hasattr(self, "simple_design_matrix"):
+            log.warning("Need to rebuild design matrices for plotting full array")
+            self._build_full_matrices()
+        return plot(self, frame=frame, vmin=vmin, vmax=vmax)
 
     def _package_weights_hdulist(self):
         """Put the masks into a fits format"""
@@ -365,9 +411,9 @@ class FullBackDrop(object):
         hdu3 = fits.ImageHDU(self.strap_w, name="strap_weights")
         hdu4 = fits.ImageHDU(self.jitter, name="jitter")
         hdu5 = fits.ImageHDU(
-            _flux(self.fnames[self.test_frame], cutout_size=self.cutout_size)
-            - self.model(self.test_frame),
-            name="test_frame",
+            _flux(self.fnames[self.test_frame_number], cutout_size=self.cutout_size)
+            - self.model(self.test_frame_number),
+            name="test_frame_number",
         )
         hdul = fits.HDUList([hdu1, hdu2, hdu3, hdu4, hdu5])
         return hdul
@@ -393,7 +439,7 @@ class FullBackDrop(object):
             "nknots",
             "degree",
             "njitter",
-            "test_frame",
+            "test_frame_number",
             "cutout_size",
         ]:
             self.hdu0.header[key] = getattr(self, key)
@@ -436,7 +482,7 @@ class FullBackDrop(object):
             dir = f"{PACKAGEDIR}/data/sector{sector:03}/camera{camera:02}/ccd{ccd:02}/"
         if not os.path.isdir(dir):
             raise ValueError(f"No solutions exist")
-        self._simplebackdrop.load(fname, dir=dir)
+        self._simplebackdrop = self._simplebackdrop.load(fname, dir=dir)
         with fits.open(dir + fname, lazy_load_hdus=True) as hdu:
             for key in [
                 "nknots",
@@ -446,53 +492,17 @@ class FullBackDrop(object):
             self.spline_w = hdu[6].data
             self.strap_w = hdu[7].data
             self.jitter = hdu[8].data
-        self.__post_init__()
-        self._simplebackdrop.load(fname, dir=dir)
+        self.sector = self._simplebackdrop.sector
+        if hasattr(self._simplebackdrop, "test_frame_number"):
+            # Inherit from simple
+            self.test_frame_number = self._simplebackdrop.test_frame_number
+        if hasattr(self._simplebackdrop, "ccd"):
+            self.column, self.row = (
+                np.arange(self.cutout_size) - self.bore_pixel[1]
+            ) / 2048, ((np.arange(self.cutout_size) - self.bore_pixel[0])) / (2048)
+        self.test_frame_number = hdu[0].header["test_frame_number"]
+        self._simplebackdrop.test_frame_number = hdu[0].header["test_frame_number"]
         return self
 
     def correct_tpf(self, tpf, exptime=None):
-        """Returns a TPF with the background corrected
-
-        Parameters
-        ----------
-        tpf : lk.TargetPixelFile
-            Target Pixel File object. Must be a TESS target pixel file, and must
-            be a 30 minute cadence.
-        exptime : float, None
-            The exposure time between each cadence. If None, will be generated from the data
-
-        Returns
-        -------
-        corrected_tpf : lk.TargetPixelFile
-            New TPF object, with the TESS background removed.
-        """
-        if exptime is None:
-            exptime = np.median(np.diff(tpf.time.value))
-        if exptime < 0.02:
-            raise ValueError(
-                "tess_backdrop can only correct 30 minute cadence FFIs currently."
-            )
-        if tpf.mission.lower() != "tess":
-            raise ValueError("tess_backdrop can only correct TESS TPFs.")
-
-        if np.any([not hasattr(self, attr) for attr in ["camera", "ccd", "sector"]]):
-            self.load((tpf.sector, tpf.camera, tpf.ccd))
-        elif (
-            (self.sector != tpf.sector)
-            | (self.camera != tpf.camera)
-            | (self.ccd != tpf.ccd)
-        ):
-            self.load((tpf.sector, tpf.camera, tpf.ccd))
-
-        tdxs = [
-            np.argmin(np.abs((self.t_start - t) + exptime))
-            for t in tpf.time.value
-            if (np.min(np.abs((self.t_start - t) + exptime)) < exptime)
-        ]
-
-        bkg = self.build_model(
-            np.arange(tpf.shape[2]) + tpf.column,
-            np.arange(tpf.shape[1]) + tpf.row,
-            times=tdxs,
-        )
-        return tpf - bkg
+        return correct_tpf(self, tpf, exptime=None)

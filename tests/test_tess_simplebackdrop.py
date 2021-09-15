@@ -11,7 +11,10 @@ def test_build():
     for cutout_size in [2048, 512]:
         fnames = ["/".join(PACKAGEDIR.split("/")[:-2]) + "/tests/data/tempffi.fits"]
         b = tbd.SimpleBackDrop(
-            np.hstack([fnames, fnames]), sector=2, test_frame=0, cutout_size=cutout_size
+            np.hstack([fnames, fnames]),
+            sector=2,
+            test_frame_number=0,
+            cutout_size=cutout_size,
         )
         if cutout_size == 2048:
             assert b.flux(0).shape == (256, 256)

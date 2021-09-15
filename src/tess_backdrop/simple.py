@@ -2,7 +2,6 @@
 import logging
 import os
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Optional
 
 import fitsio
@@ -15,7 +14,15 @@ from scipy.sparse import csr_matrix, hstack, vstack
 from tqdm import tqdm
 
 from . import PACKAGEDIR
-from .utils import get_knots, get_saturation_mask, get_spline_matrix
+from .utils import (
+    get_knots,
+    get_saturation_mask,
+    get_spline_matrix,
+    _flux,
+    _X,
+    _bin_down,
+    plot,
+)
 from .version import __version__
 
 log = logging.getLogger(__name__)
@@ -46,7 +53,7 @@ class SimpleBackDrop(object):
     nb: int = 8  # Number of bins to use to downsample images
     npoly: int = 6  # Polynomial order for cartesian
     sector: Optional = None  # Sector (otherwise will scrape from file names)
-    test_frame: Optional = None  # Reference frame
+    test_frame_number: Optional = None  # Reference frame
     cutout_size: int = 2048  # Size to cut out for faster run time (testing only)
     njitter: int = 5000  # Number of jitter components
 
@@ -80,7 +87,7 @@ class SimpleBackDrop(object):
                             raise ValueError("Files must be on the same CCD")
                         self.t_start[tdx] = hdu[0].header["TSTART"]
                         self.quality[tdx] = hdu[1].header["DQUALITY"]
-        if (self.test_frame is None) and (self.fnames is not None):
+        if (self.test_frame_number is None) and (self.fnames is not None):
             try:
                 # Test frame is a low flux frame, close to the middle of the dataset.
                 f = np.asarray(
@@ -89,14 +96,14 @@ class SimpleBackDrop(object):
                             np.min([self.bore_pixel[0], 2047]),
                             45 + np.min([self.bore_pixel[1], 0]),
                         ]
-                        for fname in tqdm(self.fnames)
+                        for fname in self.fnames
                     ]
                 )
 
                 l = np.where((f < np.nanpercentile(f, 5)) & (self.quality == 0))[0]
-                self.test_frame = l[np.argmin(np.abs(l - len(f) // 2))]
+                self.test_frame_number = l[np.argmin(np.abs(l - len(f) // 2))]
             except:
-                self.test_frame = self.shape[0] // 2
+                self.test_frame_number = self.shape[0] // 2
 
         if self.fnames is not None:
             s = np.argsort(self.t_start)
@@ -218,7 +225,7 @@ class SimpleBackDrop(object):
                     *np.gradient(
                         np.nan_to_num(
                             _flux(
-                                self.fnames[self.test_frame],
+                                self.fnames[self.test_frame_number],
                                 cutout_size=self.cutout_size,
                             )
                         )
@@ -236,7 +243,7 @@ class SimpleBackDrop(object):
         if not hasattr(self, "sat_mask"):
             self.sat_mask = (
                 get_saturation_mask(
-                    fitsio.read(self.fnames[self.test_frame])[
+                    fitsio.read(self.fnames[self.test_frame_number])[
                         : self.cutout_size, 45 : 45 + self.cutout_size
                     ],
                     cutout_size=self.cutout_size,
@@ -287,17 +294,17 @@ class SimpleBackDrop(object):
             self.sigma_w_inv += np.diag(1 / self.simple_prior_sigma ** 2)
         return w
 
-    def fit_model(self, test_frame=None):
+    def fit_model(self, test_frame_number=None):
         """Fit the Backdrop model to the image stack in find_bad_frames
 
         Parameters
         ----------
-            test_frame : int
+            test_frame_number : int
                 Optional frame to use as a test frame
         """
-        if test_frame is None:
-            test_frame = self.test_frame
-        _ = self.fit_frame(test_frame, store=True)
+        if test_frame_number is None:
+            test_frame_number = self.test_frame_number
+        _ = self.fit_frame(test_frame_number, store=True)
         self.w = np.zeros((self.shape[0], self.A.shape[1]))
         for tdx in tqdm(range(self.shape[0])):
             self.w[tdx] = self.fit_frame(tdx, store=False)
@@ -365,7 +372,7 @@ class SimpleBackDrop(object):
             "nb",
             "npoly",
             "njitter",
-            "test_frame",
+            "test_frame_number",
             "cutout_size",
         ]:
             self.hdu0.header[key] = getattr(self, key)
@@ -421,7 +428,7 @@ class SimpleBackDrop(object):
                 "nb",
                 "npoly",
                 "njitter",
-                "test_frame",
+                "test_frame_number",
                 "cutout_size",
             ]:
                 setattr(self, key, hdu[0].header[key])
@@ -491,84 +498,11 @@ class SimpleBackDrop(object):
         return bkg
 
     def correct_tpf(self, tpf, exptime=None):
-        """Returns a TPF with the background corrected
-
-        Parameters
-        ----------
-        tpf : lk.TargetPixelFile
-            Target Pixel File object. Must be a TESS target pixel file, and must
-            be a 30 minute cadence.
-        exptime : float, None
-            The exposure time between each cadence. If None, will be generated from the data
-
-        Returns
-        -------
-        corrected_tpf : lk.TargetPixelFile
-            New TPF object, with the TESS background removed.
-        """
-        if exptime is None:
-            exptime = np.median(np.diff(tpf.time.value))
-        if exptime < 0.02:
-            raise ValueError(
-                "tess_backdrop can only correct 30 minute cadence FFIs currently."
-            )
-        if tpf.mission.lower() != "tess":
-            raise ValueError("tess_backdrop can only correct TESS TPFs.")
-
-        if np.any([not hasattr(self, attr) for attr in ["camera", "ccd", "sector"]]):
-            self.load((tpf.sector, tpf.camera, tpf.ccd))
-        elif (
-            (self.sector != tpf.sector)
-            | (self.camera != tpf.camera)
-            | (self.ccd != tpf.ccd)
-        ):
-            self.load((tpf.sector, tpf.camera, tpf.ccd))
-
-        tdxs = [
-            np.argmin(np.abs((self.t_start - t) + exptime))
-            for t in tpf.time.value
-            if (np.min(np.abs((self.t_start - t) + exptime)) < exptime)
-        ]
-
-        bkg = self.build_model(
-            np.arange(tpf.shape[2]) + tpf.column,
-            np.arange(tpf.shape[1]) + tpf.row,
-            times=tdxs,
-        )
-        return tpf - bkg
+        return correct_tpf(self, tpf, exptime=None)
 
     def plot(self, frame=0, vmin=None, vmax=None):
         """Plots a given frame of the data, model and residuals"""
-        with plt.style.context("seaborn-white"):
-            f = self.flux(frame)
-            if np.nansum(f) == 0:
-                fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True, sharey=True)
-                if vmin is None:
-                    vmin = np.nanpercentile(self.model(frame), 1)
-                if vmax is None:
-                    vmax = np.nanpercentile(self.model(frame), 99)
-                ax = [ax]
-            else:
-                fig, ax = plt.subplots(1, 3, figsize=(20, 6), sharex=True, sharey=True)
-                if vmin is None:
-                    vmin = np.nanpercentile(f, 1)
-                if vmax is None:
-                    vmax = np.nanpercentile(f, 99)
-            ax[0].imshow(self.model(frame), vmin=vmin, vmax=vmax, cmap="Greys_r")
-            ax[0].set(xlabel="Column", ylabel="Row", title="Model")
-            if np.nansum(f) == 0:
-                return ax[0]
-            ax[1].imshow(f, vmin=vmin, vmax=vmax, cmap="Greys_r")
-            ax[1].set(xlabel="Column", title="Data")
-            if np.nansum(f) != 0:
-                ax[2].imshow(
-                    self.flux(frame) - self.model(frame),
-                    vmin=-10,
-                    vmax=10,
-                    cmap="coolwarm",
-                )
-                ax[2].set(xlabel="Column", title="Residuals")
-        return ax
+        return plot(self, frame=frame, vmin=vmin, vmax=vmax)
 
     def plot_test_frame(self):
         if self.fnames is None:
@@ -576,7 +510,7 @@ class SimpleBackDrop(object):
         with plt.style.context("seaborn-white"):
             fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True, sharey=True)
             ax = [ax]
-            f = _flux(self.fnames[self.test_frame], cutout_size=self.cutout_size)
+            f = _flux(self.fnames[self.test_frame_number], cutout_size=self.cutout_size)
             im = ax[0].imshow(
                 f,
                 vmin=np.nanpercentile(f, 10),
@@ -587,32 +521,3 @@ class SimpleBackDrop(object):
             cbar.set_label("Counts")
             ax[0].set(title="Test Frame", xlabel="Column", ylabel="Row")
         return ax
-
-
-@lru_cache(maxsize=16)
-def _flux(fname, cutout_size=2048, limit=100):
-    """Let's us cache some frames in memory"""
-    f = fitsio.read(fname)[:cutout_size, 45 : 45 + cutout_size]
-    f[f < limit] = np.nan
-    return f
-
-
-def _bin_down(flux, nb, cutout_size=2048, func=np.nanmin, limit=100):
-    """Bins the flux down to a resolution of 2048/`nb` and takes the `func`"""
-    if nb == 1:
-        return flux
-    ar = np.zeros((cutout_size // nb, cutout_size // nb, nb, nb))
-    for idx in range(nb):
-        for jdx in range(nb):
-            ar[:, :, idx, jdx] = flux[idx::nb, jdx::nb]
-    ar[ar <= 0] = np.nan
-    return func(ar, axis=(2, 3))
-
-
-def _X(x, knots, degree):
-    matrices = [
-        csr_matrix(_spline_basis_vector(x, degree, idx, knots))
-        for idx in np.arange(-1, len(knots) - degree - 1)
-    ]
-    X = vstack(matrices, format="csr").T
-    return X

@@ -1,4 +1,5 @@
 import logging
+from functools import lru_cache
 
 import fitsio
 import matplotlib.pyplot as plt
@@ -7,17 +8,146 @@ from lightkurve.correctors.designmatrix import _spline_basis_vector
 from matplotlib import animation
 from scipy.sparse import csr_matrix, hstack, lil_matrix, vstack
 
+
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "get_knots",
+    #    "get_knots",
     "find_saturation_column_centers",
-    "find_bad_frames",
+    #    "find_bad_frames",
     "get_saturation_mask",
     "std_iter",
     "animate",
-    "get_spline_matrix",
+    #    "get_spline_matrix",
 ]
+
+
+@lru_cache(maxsize=16)
+def _flux(fname, cutout_size=2048, limit=100):
+    """Let's us cache some frames in memory"""
+    f = fitsio.read(fname)[:cutout_size, 45 : 45 + cutout_size]
+    f[f < limit] = np.nan
+    return f
+
+
+def _bin_down(flux, nb, cutout_size=2048, func=np.nanmin, limit=100):
+    """Bins the flux down to a resolution of 2048/`nb` and takes the `func`"""
+    if nb == 1:
+        return flux
+    ar = np.zeros((cutout_size // nb, cutout_size // nb, nb, nb))
+    for idx in range(nb):
+        for jdx in range(nb):
+            ar[:, :, idx, jdx] = flux[idx::nb, jdx::nb]
+    ar[ar <= 0] = np.nan
+    return func(ar, axis=(2, 3))
+
+
+def _X(x, knots, degree):
+    """Makes a matrix of spline components from a vectors
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Vector to create a matrix from
+    knots: np.ndarray
+        Array of knots WITH BOUNDS
+    degree : int
+        Degree of spline
+
+    Returns
+    -------
+    X : np.ndarray
+        Matrix of spline components
+    """
+    matrices = [
+        csr_matrix(_spline_basis_vector(x, degree, idx, knots))
+        for idx in np.arange(-1, len(knots) - degree - 1)
+    ]
+    X = vstack(matrices, format="csr").T
+    return X
+
+
+def plot(self, frame=0, vmin=None, vmax=None):
+    """Plots a given frame of the data, model and residuals"""
+    with plt.style.context("seaborn-white"):
+        f = self.flux(frame)
+        if np.nansum(f) == 0:
+            fig, ax = plt.subplots(1, 1, figsize=(8, 6), sharex=True, sharey=True)
+            if vmin is None:
+                vmin = np.nanpercentile(self.model(frame), 1)
+            if vmax is None:
+                vmax = np.nanpercentile(self.model(frame), 99)
+            ax = [ax]
+        else:
+            fig, ax = plt.subplots(1, 3, figsize=(20, 6), sharex=True, sharey=True)
+            if vmin is None:
+                vmin = np.nanpercentile(f, 1)
+            if vmax is None:
+                vmax = np.nanpercentile(f, 99)
+        ax[0].imshow(self.model(frame), vmin=vmin, vmax=vmax, cmap="Greys_r")
+        ax[0].set(xlabel="Column", ylabel="Row", title="Model")
+        if np.nansum(f) == 0:
+            return ax[0]
+        ax[1].imshow(f, vmin=vmin, vmax=vmax, cmap="Greys_r")
+        ax[1].set(xlabel="Column", title="Data")
+        if np.nansum(f) != 0:
+            ax[2].imshow(
+                self.flux(frame) - self.model(frame),
+                vmin=-10,
+                vmax=10,
+                cmap="coolwarm",
+            )
+            ax[2].set(xlabel="Column", title="Residuals")
+    return ax
+
+
+def correct_tpf(self, tpf, exptime=None):
+    """Returns a TPF with the background corrected
+
+    Parameters
+    ----------
+    self : tbd.SimpleBackDrop or tbd.FullBackDrop
+        A backdrop object to use to correct the TPF
+    tpf : lk.TargetPixelFile
+        Target Pixel File object. Must be a TESS target pixel file, and must
+        be a 30 minute cadence.
+    exptime : float, None
+        The exposure time between each cadence. If None, will be generated from the data
+    Returns
+    -------
+    corrected_tpf : lk.TargetPixelFile
+        New TPF object, with the TESS background removed.
+    """
+    if exptime is None:
+        exptime = np.median(np.diff(tpf.time.value))
+    if exptime < 0.02:
+        raise ValueError(
+            "tess_backdrop can only correct 30 minute cadence FFIs currently."
+        )
+    if tpf.mission.lower() != "tess":
+        raise ValueError("tess_backdrop can only correct TESS TPFs.")
+
+    if np.any([not hasattr(self, attr) for attr in ["camera", "ccd", "sector"]]):
+        self.load((tpf.sector, tpf.camera, tpf.ccd))
+    elif (
+        (self.sector != tpf.sector)
+        | (self.camera != tpf.camera)
+        | (self.ccd != tpf.ccd)
+    ):
+        self.load((tpf.sector, tpf.camera, tpf.ccd))
+
+    tdxs = [
+        np.argmin(np.abs((self.t_start - t) + exptime))
+        for t in tpf.time.value
+        if (np.min(np.abs((self.t_start - t) + exptime)) < exptime)
+    ]
+
+    bkg = self.build_model(
+        np.arange(tpf.shape[2]) + tpf.column,
+        np.arange(tpf.shape[1]) + tpf.row,
+        times=tdxs,
+    )
+    return tpf - bkg
 
 
 def animate(data, scale="linear", output="out.mp4", **kwargs):
@@ -79,34 +209,34 @@ def animate(data, scale="linear", output="out.mp4", **kwargs):
 #     return Xf
 
 
-def get_knots(x, nknots, degree):
-    """Find the b-spline knot spacing for an input array x, number of knots and degree
-
-    Parameters
-    ----------
-    x : np.ndarray
-        In put vector to create b-spline for
-    nknots : int
-        Number of knots to use in the b-spline
-    degree : int
-        Degree of the b-spline
-
-    Returns
-    -------
-    knots_wbounds : np.ndarray
-        The knot locations for the input x.
-    """
-    x = np.sort(x)
-    knots = np.asarray(
-        [s[-1] for s in np.array_split(np.argsort(x), nknots - degree)[:-1]]
-    )
-    knots = [np.mean([x[k], x[k + 1]]) for k in knots]
-    knots = np.append(np.append(x.min(), knots), x.max())
-    knots = np.unique(knots)
-    knots_wbounds = np.append(
-        np.append([x.min()] * (degree - 1), knots), [x.max()] * (degree)
-    )
-    return knots_wbounds
+# def get_knots(x, nknots, degree):
+#     """Find the b-spline knot spacing for an input array x, number of knots and degree
+#
+#     Parameters
+#     ----------
+#     x : np.ndarray
+#         In put vector to create b-spline for
+#     nknots : int
+#         Number of knots to use in the b-spline
+#     degree : int
+#         Degree of the b-spline
+#
+#     Returns
+#     -------
+#     knots_wbounds : np.ndarray
+#         The knot locations for the input x.
+#     """
+#     x = np.sort(x)
+#     knots = np.asarray(
+#         [s[-1] for s in np.array_split(np.argsort(x), nknots - degree)[:-1]]
+#     )
+#     knots = [np.mean([x[k], x[k + 1]]) for k in knots]
+#     knots = np.append(np.append(x.min(), knots), x.max())
+#     knots = np.unique(knots)
+#     knots_wbounds = np.append(
+#         np.append([x.min()] * (degree - 1), knots), [x.max()] * (degree)
+#     )
+#     return knots_wbounds
 
 
 def find_saturation_column_centers(mask):
@@ -241,75 +371,75 @@ def std_iter(x, mask, sigma=3, n_iters=3):
     return std
 
 
-def find_bad_frames(fnames, cutout_size=2048, corner_check=False):
-    """Identifies frames that probably have a lot of scattered lightkurve
-    If quality flags are available, will use TESS quality flags.
+# def find_bad_frames(fnames, cutout_size=2048, corner_check=False):
+#     """Identifies frames that probably have a lot of scattered lightkurve
+#     If quality flags are available, will use TESS quality flags.
+#
+#     If unavailable, or if `corner_check=True`, loads the 30x30 pixel corner
+#     region of every frame, and uses them to find frames that have a lot of
+#     scattered light.
+#
+#
+#     """
+#
+#     quality = np.zeros(len(fnames), int)
+#     warned = False
+#
+#     log.info("Extracting quality")
+#     for idx, fname in enumerate(fnames):
+#         try:
+#             quality[idx] = fitsio.read_header(fname, 1)["DQUALITY"]
+#         except KeyError:
+#             if warned is False:
+#                 log.warning("Quality flags are missing.")
+#                 warned = True
+#             continue
+#     bad = (quality & (2048 | 175)) != 0
+#
+#     if warned | corner_check:
+#         log.info("Using corner check")
+#         corner = np.zeros((4, len(fnames)))
+#         for tdx, fname in enumerate(fnames):
+#             corner[0, tdx] = fitsio.read(fname)[:30, 45 : 45 + 30].mean()
+#             corner[1, tdx] = fitsio.read(fname)[-30:, 45 : 45 + 30].mean()
+#             corner[2, tdx] = fitsio.read(fname)[
+#                 :30, 45 + cutout_size - 30 : 45 + cutout_size
+#             ].mean()
+#             corner[3, tdx] = fitsio.read(fname)[
+#                 -30:, 45 + cutout_size - 30 - 1 : 45 + cutout_size
+#             ].mean()
+#
+#         c = corner.T - np.median(corner, axis=1)
+#         c /= np.std(c, axis=0)
+#         bad = (np.abs(c) > 2).any(axis=1)
+#         #    bad |= corner.std(axis=0) > 200
+#     return bad, quality
 
-    If unavailable, or if `corner_check=True`, loads the 30x30 pixel corner
-    region of every frame, and uses them to find frames that have a lot of
-    scattered light.
 
-
-    """
-
-    quality = np.zeros(len(fnames), int)
-    warned = False
-
-    log.info("Extracting quality")
-    for idx, fname in enumerate(fnames):
-        try:
-            quality[idx] = fitsio.read_header(fname, 1)["DQUALITY"]
-        except KeyError:
-            if warned is False:
-                log.warning("Quality flags are missing.")
-                warned = True
-            continue
-    bad = (quality & (2048 | 175)) != 0
-
-    if warned | corner_check:
-        log.info("Using corner check")
-        corner = np.zeros((4, len(fnames)))
-        for tdx, fname in enumerate(fnames):
-            corner[0, tdx] = fitsio.read(fname)[:30, 45 : 45 + 30].mean()
-            corner[1, tdx] = fitsio.read(fname)[-30:, 45 : 45 + 30].mean()
-            corner[2, tdx] = fitsio.read(fname)[
-                :30, 45 + cutout_size - 30 : 45 + cutout_size
-            ].mean()
-            corner[3, tdx] = fitsio.read(fname)[
-                -30:, 45 + cutout_size - 30 - 1 : 45 + cutout_size
-            ].mean()
-
-        c = corner.T - np.median(corner, axis=1)
-        c /= np.std(c, axis=0)
-        bad = (np.abs(c) > 2).any(axis=1)
-        #    bad |= corner.std(axis=0) > 200
-    return bad, quality
-
-
-def get_spline_matrix(xc, xr=None, degree=2, nknots=20):
-    """Helper function to make a 2D spline matrix in a fairly memory efficient way."""
-
-    def _X(x, degree, knots):
-        matrices = [
-            csr_matrix(_spline_basis_vector(x, degree, idx, knots))
-            for idx in np.arange(-1, len(knots) - degree - 1)
-        ]
-        X = vstack(matrices, format="csr").T
-        return X
-
-    xc_knots = get_knots(xc, nknots=nknots, degree=degree)
-    if xr is None:
-        xr = xc
-        xr_knots = xc_knots
-    else:
-        xr_knots = get_knots(xr, nknots=nknots, degree=degree)
-    Xc = _X(xc, degree, xc_knots)
-    Xcf = vstack([Xc for idx in range(len(xr))]).tocsr()
-    Xr = _X(xr, degree, xr_knots)
-    Xrf = (
-        hstack([Xr for idx in range(len(xc))])
-        .reshape((Xcf.shape[0], Xc.shape[1]))
-        .tocsr()
-    )
-    Xf = hstack([Xrf.multiply(X.T) for X in Xcf.T]).tocsr()
-    return Xf
+# def get_spline_matrix(xc, xr=None, degree=2, nknots=20):
+#     """Helper function to make a 2D spline matrix in a fairly memory efficient way."""
+#
+#     def _X(x, degree, knots):
+#         matrices = [
+#             csr_matrix(_spline_basis_vector(x, degree, idx, knots))
+#             for idx in np.arange(-1, len(knots) - degree - 1)
+#         ]
+#         X = vstack(matrices, format="csr").T
+#         return X
+#
+#     xc_knots = get_knots(xc, nknots=nknots, degree=degree)
+#     if xr is None:
+#         xr = xc
+#         xr_knots = xc_knots
+#     else:
+#         xr_knots = get_knots(xr, nknots=nknots, degree=degree)
+#     Xc = _X(xc, degree, xc_knots)
+#     Xcf = vstack([Xc for idx in range(len(xr))]).tocsr()
+#     Xr = _X(xr, degree, xr_knots)
+#     Xrf = (
+#         hstack([Xr for idx in range(len(xc))])
+#         .reshape((Xcf.shape[0], Xc.shape[1]))
+#         .tocsr()
+#     )
+#     Xf = hstack([Xrf.multiply(X.T) for X in Xcf.T]).tocsr()
+#     return Xf

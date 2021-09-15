@@ -1,6 +1,6 @@
-# Documentation for `SimpleBackDrop`
+# Documentation for `FullBackDrop`
 
-::: tess_backdrop.SimpleBackDrop
+::: tess_backdrop.FullBackDrop
     handler: python
     selection:
       members:
